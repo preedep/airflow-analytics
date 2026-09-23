@@ -1,0 +1,1408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Airflow DAG Parsing</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.10);
+  --series-1: #2a78d6;
+  --series-1-soft: #cde2fb;
+  --series-2: #eb6834;
+  --critical: #d03b3b;
+  --warning: #fab219;
+  --neutral: #f0efec;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --series-1: #3987e5;
+    --series-1-soft: #184f95;
+    --series-2: #d95926;
+    --neutral: #383835;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --ink: #ffffff;
+  --ink-2: #c3c2b7;
+  --muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255, 255, 255, 0.10);
+  --series-1: #3987e5;
+  --series-1-soft: #184f95;
+  --series-2: #d95926;
+  --neutral: #383835;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+main { max-width: 1240px; margin: 0 auto; padding: 24px 16px 64px; }
+header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+h2 { font-size: 16px; margin: 0 0 2px; }
+h3 { font-size: 14px; margin: 0 0 8px; color: var(--ink-2); font-weight: 600; }
+.meta, .note { color: var(--ink-2); font-size: 13px; margin: 0; }
+.note { margin-bottom: 12px; }
+.note strong { color: var(--ink); }
+button, select, input {
+  font: inherit; color: var(--ink); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px;
+}
+button { cursor: pointer; }
+button:hover { background: var(--neutral); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); min-width: 0; gap: 12px; margin-bottom: 20px; }
+.tile, section { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+.tile { padding: 14px 16px; }
+.tile .label { color: var(--ink-2); font-size: 12px; }
+.tile .value { font-size: 26px; font-weight: 600; margin: 2px 0; }
+.tile .sub { color: var(--muted); font-size: 12px; }
+.tile.alert .value::before { content: "⚠ "; font-size: 18px; color: var(--critical); }
+a { color: var(--series-1); }
+.glossary ul { margin: 0 0 6px; padding-left: 20px; }
+:lang(th) { font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans Thai", "Leelawadee UI", "Thonburi", sans-serif; line-height: 1.7; }
+:lang(th) code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.h2-th { color: var(--ink-2); font-size: 15px; font-weight: 500; margin-left: 6px; }
+.note-th { display: block; margin-top: 2px; }
+:root[data-lang="en"] [lang="th"].h2-th, :root[data-lang="en"] .note-th { display: none; }
+:root[data-lang="th"] .h2-en { display: none; }
+:root[data-lang="th"] .h2-th { color: var(--ink); font-size: 16px; font-weight: 600; margin-left: 0; }
+.term-th { display: block; font-weight: 500; color: var(--ink-2); }
+.th-block { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--grid); }
+.lang-switch { display: inline-flex; gap: 4px; margin-top: 12px; }
+.lang-switch button { padding: 3px 10px; font-size: 12px; }
+.lang-switch button[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+.callout { border: 1px solid var(--border); border-left: 4px solid var(--warning); background: var(--surface); border-radius: 8px; padding: 12px 16px; margin: -8px 0 20px; font-size: 13px; color: var(--ink-2); }
+.callout strong { color: var(--ink); }
+.callout::before { content: "⚠ "; color: var(--ink); }
+.info { color: var(--muted); text-decoration: none; margin-left: 4px; }
+.info:hover { color: var(--ink); }
+summary { cursor: pointer; }
+summary h2 { display: inline; }
+.summary-count { color: var(--muted); font-size: 13px; margin-left: 8px; }
+.glossary { display: grid; grid-template-columns: minmax(0, 220px) minmax(0, 1fr); gap: 10px 20px; margin: 14px 0 0; }
+.glossary dt { font-weight: 600; }
+.glossary dd { margin: 0; color: var(--ink-2); }
+.glossary dd p { margin: 0 0 6px; }
+.glossary :target, .glossary dt:target + dd { background: var(--neutral); border-radius: 4px; }
+@media (max-width: 860px) { .glossary { grid-template-columns: minmax(0, 1fr); } .glossary dd { margin-bottom: 8px; } }
+section { padding: 18px 20px; margin-bottom: 20px; min-width: 0; }
+.row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
+.row > section { margin-bottom: 0; }
+.row + section, .row + .row { margin-top: 20px; }
+.chart { width: 100%; height: 360px; }
+.split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
+.split > *, .row > * { min-width: 0; }
+.panel { margin-top: 12px; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { color: var(--ink-2); font-weight: 600; position: sticky; top: 0; background: var(--surface); }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable::after { content: " ↕"; color: var(--muted); }
+th[aria-sort="ascending"]::after { content: " ↑"; color: var(--ink); }
+th[aria-sort="descending"]::after { content: " ↓"; color: var(--ink); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.id { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
+#suspects-table td.id { max-width: 280px; }
+#dag-table td.id { max-width: 340px; }
+.badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 4px; margin-right: 4px; border: 1px solid var(--border); color: var(--ink-2); }
+.badge.critical::before { content: "● "; color: var(--critical); }
+.badge.warning::before { content: "● "; color: var(--warning); }
+.badge.muted::before { content: "○ "; color: var(--muted); }
+.controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.controls input { flex: 1 1 240px; }
+.footer-row { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; color: var(--ink-2); font-size: 13px; gap: 8px; flex-wrap: wrap; }
+.scroll { max-height: 360px; overflow-y: auto; }
+#row-tip {
+  position: fixed; z-index: 1000; max-width: 460px; pointer-events: none;
+  background: var(--surface); color: var(--ink); border: 1px solid var(--axis); border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22); padding: 10px 14px; font-size: 12.5px; line-height: 1.6;
+}
+#row-tip .tip-id { font-weight: 600; word-break: break-all; }
+#row-tip .tip-sub { color: var(--muted); font-size: 11.5px; word-break: break-all; margin-bottom: 6px; }
+#row-tip .tip-badges { margin-bottom: 6px; }
+#row-tip dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; margin: 0; }
+#row-tip dt { color: var(--ink-2); }
+#row-tip dd { margin: 0; }
+#row-tip .tip-note { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--grid); color: var(--ink-2); }
+#row-tip .tip-note ul { margin: 2px 0 0; padding-left: 18px; }
+#dag-table tbody tr:hover { background: var(--neutral); }
+#dag-table tbody tr.row-changed td:first-child { box-shadow: inset 3px 0 0 var(--series-1); }
+#dag-table tbody tr.row-removed td { opacity: 0.5; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+.dot-changed { background: var(--series-1); }
+.dot-same { border: 1.5px solid var(--muted); width: 7px; height: 7px; }
+.dot-removed { background: var(--axis); }
+.table-legend { display: flex; gap: 18px; flex-wrap: wrap; }
+dialog {
+  width: min(980px, calc(100vw - 32px)); max-height: calc(100vh - 48px); padding: 20px 22px;
+  background: var(--surface); color: var(--ink); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.25);
+}
+dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+.dialog-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
+.dialog-head h2 { font-size: 20px; }
+.dialog-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.dialog-tiles .tile { padding: 10px 12px; }
+.dialog-tiles .tile .value { font-size: 20px; }
+.dialog-table-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.dialog-table-head h3 { margin: 0; }
+@media (max-width: 860px) {
+  .row, .split { grid-template-columns: minmax(0, 1fr); }
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  section { padding: 14px 12px; }
+  .chart { height: 320px; }
+}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Airflow DAG processor: parse time report</h1>
+      <p class="meta" id="meta"></p>
+    </div>
+    <button id="theme-toggle" type="button" aria-label="Toggle color theme">Theme: auto</button>
+  </header>
+
+  <div class="tiles" id="tiles"></div>
+  <div class="callout" id="assumptions" hidden></div>
+
+  <section id="glossary">
+    <details id="glossary-details">
+      <summary><h2><span class="h2-en">How to read this report</span> <span class="h2-th" lang="th">วิธีอ่านรายงานนี้</span></h2></summary>
+      <div class="lang-switch" id="lang-switch" role="group" aria-label="Language">
+        <button type="button" data-lang="both">EN + ไทย</button>
+        <button type="button" data-lang="en">English</button>
+        <button type="button" data-lang="th">ไทย</button>
+      </div>
+      <dl class="glossary" id="glossary-list"></dl>
+    </details>
+  </section>
+
+  <section>
+    <h2><span class="h2-en">Parse loop: observed vs estimated</span> <span class="h2-th" lang="th">รอบการ parse: ค่าจริงเทียบกับค่าประมาณ</span></h2>
+    <p class="note" id="note-loop"></p>
+    <div class="split">
+      <div><h3 id="loop-compare-title"></h3><div class="chart" id="chart-loop" style="height:220px"></div></div>
+      <div><h3 id="activity-title"></h3><div class="chart" id="chart-activity" style="height:220px"></div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Slowest DAGs</h2>
+    <p class="note" id="note-slowest"></p>
+    <div class="chart" id="chart-slowest"></div>
+  </section>
+
+  <div class="row">
+    <section>
+      <h2><span class="h2-en">Parse time distribution</span> <span class="h2-th" lang="th">การกระจายตัวของเวลา parse</span></h2>
+      <p class="note" id="note-histogram"></p>
+      <div class="chart" id="chart-histogram"></div>
+      <div class="panel" id="bin-panel"></div>
+    </section>
+    <section>
+      <h2><span class="h2-en">Cumulative distribution</span> <span class="h2-th" lang="th">การกระจายสะสม</span></h2>
+      <p class="note" id="note-ecdf"></p>
+      <div class="chart" id="chart-ecdf"></div>
+    </section>
+  </div>
+
+  <div class="row">
+    <section>
+      <h2><span class="h2-en">Where the parse time goes</span> <span class="h2-th" lang="th">เวลา parse ไปอยู่ที่ไหน</span></h2>
+      <p class="note" id="note-pareto"></p>
+      <div class="chart" id="chart-pareto"></div>
+    </section>
+    <section>
+      <h2><span class="h2-en">By environment</span> <span class="h2-th" lang="th">แยกตาม environment</span></h2>
+      <p class="note" id="note-env"></p>
+      <div class="chart" id="chart-env"></div>
+    </section>
+  </div>
+
+  <section>
+    <h2>By application</h2>
+    <p class="note" id="note-app"></p>
+    <div class="split">
+      <div><h3>Total parse time</h3><div class="chart" id="chart-app-total"></div></div>
+      <div><h3>Parse time spread per DAG (min · Q1 · median · Q3 · max)</h3><div class="chart" id="chart-app-box"></div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Version churn</h2>
+    <p class="note" id="note-churn"></p>
+    <div class="split">
+      <div><h3>Most versions</h3><div class="chart" id="chart-churn"></div></div>
+      <div><h3>Versions vs parse time (all DAGs)</h3><div class="chart" id="chart-churn-scatter"></div></div>
+    </div>
+  </section>
+
+  <section id="section-suspects" hidden>
+    <h2><span class="h2-en">Non-deterministic DAG suspects</span> <span class="h2-th" lang="th">DAG ที่น่าจะไม่คงที่ (non-deterministic)</span></h2>
+    <p class="note" id="note-suspects"></p>
+    <div class="split">
+      <div><h3 id="suspects-chart-title"></h3><div class="chart" id="chart-suspects"></div></div>
+      <div><h3 id="suspects-table-title"></h3><div class="table-wrap scroll" id="suspects-table" style="max-height:640px"></div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Freshness</h2>
+    <p class="note" id="note-freshness"></p>
+    <div class="split">
+      <div><div class="chart" id="chart-freshness"></div></div>
+      <div class="table-wrap scroll" id="overdue-table"></div>
+    </div>
+  </section>
+
+  <section id="section-removed" hidden>
+    <details id="removed-details">
+      <summary>
+        <h2><span class="h2-en">Removed DAGs (is_stale)</span> <span class="h2-th" lang="th">DAG ที่ถูกลบแล้ว (is_stale)</span></h2>
+        <span class="summary-count" id="removed-count"></span>
+      </summary>
+      <p class="note" id="note-removed" style="margin-top:12px"></p>
+      <div class="split">
+        <div><h3>By application</h3><div class="chart" id="chart-removed"></div></div>
+        <div><h3>Removed DAGs, longest gone first</h3><div class="table-wrap scroll" id="removed-table"></div></div>
+      </div>
+    </details>
+  </section>
+
+  <section>
+    <h2>All DAGs</h2>
+    <div class="controls">
+      <input id="f-search" type="search" placeholder="Search DAG id or file…" aria-label="Search">
+      <select id="f-app" aria-label="Application"></select>
+      <select id="f-env" aria-label="Environment"></select>
+      <select id="f-flag" aria-label="Flag">
+        <option value="active" selected>Active DAGs</option>
+        <option value="">All DAGs (incl. removed)</option>
+        <option value="timeout">Over import timeout</option>
+        <option value="missing">No parse time</option>
+        <option value="overdue">Overdue</option>
+        <option value="removed">Removed (is_stale)</option>
+        <option value="churn">Multiple versions</option>
+        <option value="suspect">Non-deterministic suspect</option>
+        <option value="changed">New version at latest parse</option>
+        <option value="unchanged">Parsed, no new version</option>
+      </select>
+      <button id="export" type="button">Export CSV</button>
+    </div>
+    <p class="note table-legend" id="table-legend"></p>
+    <div class="table-wrap"><table id="dag-table"></table></div>
+    <div class="footer-row"><span id="table-count"></span><button id="more" type="button">Show more</button></div>
+  </section>
+</main>
+
+<div id="row-tip" role="tooltip" hidden></div>
+
+<dialog id="app-dialog" aria-labelledby="app-dialog-title">
+  <div class="dialog-head">
+    <div>
+      <p class="meta" id="app-dialog-kicker"></p>
+      <h2 id="app-dialog-title"></h2>
+    </div>
+    <button type="button" id="app-dialog-close" aria-label="Close">✕</button>
+  </div>
+  <div class="dialog-tiles" id="app-dialog-tiles"></div>
+  <p class="note" id="app-dialog-box"></p>
+  <h3 id="app-dialog-chart-title"></h3>
+  <div class="chart" id="app-dialog-chart" style="height:220px"></div>
+  <div class="dialog-table-head">
+    <h3 id="app-dialog-table-title"></h3>
+    <button type="button" id="app-dialog-filter"></button>
+  </div>
+  <div class="table-wrap scroll" id="app-dialog-table"></div>
+</dialog>
+
+<script type="application/json" id="report-data">"__DATA__"</script>
+<script>/*__ECHARTS__*/</script>
+<script>
+(function () {
+  "use strict";
+  const DATA = JSON.parse(document.getElementById("report-data").textContent);
+  const R = DATA.dag_processor;
+  const S = R.summary;
+  const O = R.observed_loop;
+  const CFG = R.settings;
+  const dags = R.dags;
+
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+  const num = (v, d = 1) => v.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+  const int = (v) => v.toLocaleString();
+  const secs = (v) => v == null ? "—" : num(v, v < 10 ? 2 : 1) + " s";
+  function duration(s) {
+    if (s < 60) return num(s, 1) + " s";
+    if (s < 3600) return num(s / 60, 1) + " min";
+    return num(s / 3600, 1) + " h";
+  }
+  const hours = (h) => h == null ? "—" : h < 48 ? num(h, 1) + " h" : num(h / 24, 1) + " d";
+  const pct = (v) => num(v, 1) + "%";
+
+  // ---------- header, tiles, notes ----------
+  const limitEn = (v) => v >= 60 ? `${num(v / 60, v % 60 ? 1 : 0)} min (${int(v)} s)` : `${num(v, v % 1 ? 1 : 0)} s`;
+  const limitTh = (v) => v >= 60 ? `${num(v / 60, v % 60 ? 1 : 0)} นาที (${int(v)} วินาที)` : `${num(v, v % 1 ? 1 : 0)} วินาที`;
+  const TIMEOUT_EN = limitEn(CFG.import_timeout);
+  const TIMEOUT_TH = limitTh(CFG.import_timeout);
+  const FP_EN = limitEn(CFG.file_processor_timeout);
+  const FP_TH = limitTh(CFG.file_processor_timeout);
+  const LIMIT_EN = limitEn(R.timeout_limit);
+  const LIMIT_TH = limitTh(R.timeout_limit);
+  // Only meaningful when the timeout wasn't read from the server: recorded parse times above it mean the real limit is higher.
+  const showHigherHint = (CFG.import_timeout_assumed || CFG.file_processor_timeout_assumed) && S.over_timeout_count > 0;
+  const ASSUMED_EN = ", Airflow default, assumed";
+  const ASSUMED_TH = ", ค่าเริ่มต้นของ Airflow ที่สมมติไว้";
+  $("meta").textContent =
+    `Source: ${DATA.source} · ${int(S.version_rows)} versions → ${int(S.all_dag_count)} DAGs` +
+    (R.has_removed_flag ? ` (${int(S.dag_count)} active, ${int(S.removed_count)} removed)` : "") + ` · ` +
+    `newest parse ${R.reference_time ?? "n/a"} · parsing_processes=${CFG.parsing_processes}${CFG.parsing_processes_assumed ? " (assumed)" : ""}, ` +
+    `dagbag_import_timeout=${TIMEOUT_EN}${CFG.import_timeout_assumed ? " (assumed)" : ""}, ` +
+    `dag_file_processor_timeout=${FP_EN}${CFG.file_processor_timeout_assumed ? " (assumed)" : ""}, overdue>${CFG.overdue_hours}h`;
+
+  const REF = esc(R.reference_time ?? "n/a");
+  const GLOSSARY_EN = {
+    parse: {
+      term: "Parse time",
+      short: "How long the DAG processor took to import this DAG's Python file the last time it parsed it.",
+      detail: `<p>The <code>parse_seconds</code> value from the export: how long the DAG processor took to import the DAG's Python file the last time it parsed it. While a file is being parsed, it holds one of the parsing processes, so a slow file delays every file queued behind it.</p>`,
+    },
+    percentiles: {
+      term: "p50 / p90 / p99",
+      short: "50%, 90% and 99% of parsed DAGs parse at or below this time.",
+      detail: `<p>Percentiles of parse time across the DAGs that have a parse time. p50 (the median) means half of the DAGs parse at or below this value. p90 and p99 describe the slow end of the distribution.</p>`,
+    },
+    loop: {
+      term: "Estimated full parse loop",
+      short: `Total parse time ÷ parsing_processes (${CFG.parsing_processes}): roughly how long one pass over every DAG file takes.`,
+      detail: `<p>The total parse time of all DAGs divided by <code>parsing_processes</code> (${CFG.parsing_processes}${CFG.parsing_processes_assumed ? ASSUMED_EN : ""}, set with <code>--parsing-processes</code> or <code>PARSING_PROCESSES</code>). This is roughly how long the DAG processor takes to re-parse every file once. It's also about the longest you'd wait after a deploy before a change shows up in the UI.</p>` +
+        `<p>This is only an estimate. It doesn't include <code>min_file_process_interval</code>, bundle refresh time, or the fact that one file can define several DAGs.</p>` +
+        `<p>If you run more than one DAG processor pod, count only processes that parse <i>different</i> files. Pods that parse the same bundle repeat each other's work, so the real parallelism may be lower than the total process count.</p>`,
+    },
+    observed: {
+      term: "Observed parse loop",
+      short: "How long a full pass over all active DAGs really takes, measured from last_parsed_time: 99% of active DAGs were re-parsed within this time before the export.",
+      detail: `<p>Measured from the data, not from config. Every active DAG is re-parsed once per loop, so at any moment each DAG's age (time since its last parse) is at most one loop. Two measurements:</p>` +
+        `<ul><li><b>99% re-parsed within</b>: the 99th percentile of active DAG ages. It's the practical loop length.</li>` +
+        `<li><b>From parse rate</b>: active DAGs ÷ DAGs parsed in the last hour.</li></ul>` +
+        `<p>Removed and overdue DAGs are excluded, because they don't take part in the loop. The <a href="#term-loop">estimated loop</a> assumes all <code>parsing_processes</code> work on different files all the time. If the observed loop is much longer, check for DAG processor pods that parse the same bundle (duplicate work), per-file overhead, or <code>min_file_process_interval</code>.</p>` +
+        `<p>The row tooltip in All DAGs uses it to estimate <b>when a DAG will be parsed next</b>: last parse + observed loop. It's an upper estimate, not a schedule.</p>` +
+        `<p>This comes from a single export, so it's a snapshot. Compare several exports before drawing conclusions.</p>`,
+    },
+    suspect: {
+      term: "Non-deterministic suspect",
+      short: `Active DAG with ≥ 7 new versions in 7 days or ≥ 3 in 24 hours. It probably changes on every parse rather than only on deploy.`,
+      detail: `<p>Airflow saves a new version only when the serialized DAG differs from the previous parse. Deploys produce a few versions. A DAG that keeps producing new versions, especially <b>on weekends</b> or <b>at its latest parse</b>, usually has top-level code that builds a slightly different DAG each time: <code>datetime.now()</code> in arguments, random values, or task lists built from an API, database or Variable.</p>` +
+        `<p>Cost: a database write on every parse, a noisy version history in the UI, and DAG runs tied to constantly changing versions.</p>` +
+        `<p>Columns: <b>24 h</b> / <b>7 d</b> = new versions in that window; <b>weekend</b> = new versions on Saturday or Sunday in the last 7 days; <b>at last parse</b> = the latest version was saved by the most recent parse. This is a heuristic: a team that deploys many times a day can also show up here, so check the weekend column.</p>`,
+    },
+    timeout: {
+      term: "Over import timeout",
+      short: `Last parse took longer than the timeout (${LIMIT_EN}). This is a fixed limit from Airflow config, not the average. Airflow stops imports that run that long and records an import error.`,
+      detail: `<p>The DAG's last parse time is longer than <b>${LIMIT_EN}</b>, the smaller of two Airflow settings:</p>` +
+        `<ul><li><code>dagbag_import_timeout</code> = ${TIMEOUT_EN}${CFG.import_timeout_assumed ? ASSUMED_EN : ""} (<code>IMPORT_TIMEOUT</code>). This limits importing the DAG file.</li>` +
+        `<li><code>dag_file_processor_timeout</code> = ${FP_EN}${CFG.file_processor_timeout_assumed ? ASSUMED_EN : ""} (<code>FILE_PROCESSOR_TIMEOUT</code>). This limits processing the whole file.</li></ul>` +
+        `<p>When either one runs out, Airflow stops the file and records an <b>import error</b>, so any change to that DAG never reaches the UI.</p>` +
+        `<p><b>This is not the average.</b> It's a fixed limit set in the Airflow configuration. The average parse time here is ${secs(S.mean)} and the median is ${secs(S.p50)}. Neither one affects whether a DAG times out.</p>` +
+        (showHigherHint ? `<p>These DAGs do have parse times above ${LIMIT_EN}, so they weren't stopped. That means the timeout on your server is probably set higher. Re-run the report with the real values to get an accurate count.</p>` : "") +
+        `<p>A DAG that is well under the limit can still slow down the parse loop a lot. Slow parsing is a problem even when nothing times out.</p>` +
+        `<p><b>Typical fix:</b> move heavy work out of top-level code. That includes database or API calls, <code>Variable.get()</code>, large imports, and file or network access. Top-level code runs on every parse.</p>`,
+    },
+    missing: {
+      term: "No parse time",
+      short: "parse_seconds is empty: never parsed successfully, failing to import, or the file was removed.",
+      detail: `<p>The DAG is in the metadata database, but it has no <code>parse_seconds</code> value. Possible reasons: it has never been parsed successfully, its file currently fails to import (check <b>Import Errors</b> in the Airflow UI), or its file is no longer in the bundle. These DAGs aren't included in any parse-time statistic.</p>`,
+    },
+    overdue: {
+      term: "Overdue",
+      short: `Active DAG not re-parsed for more than ${CFG.overdue_hours} h before the newest parse in this export (${R.reference_time ?? "n/a"}).`,
+      detail: `<p>An <b>active</b> DAG whose <code>last_parsed_time</code> is more than ${CFG.overdue_hours} h (set with <code>--overdue-hours</code>) older than the newest parse in this export (${REF}). Age is measured against that time, not against the current clock, so running the report again on the same export gives the same result.</p>` +
+        `<p>An active DAG is re-parsed on every loop, so an overdue DAG is one the processor hasn't reached for much longer than a loop. Likely reasons: its file now fails to import, the parse loop is extremely long, or the processor is stuck. DAGs whose file was removed are not counted here. See <a href="#term-removed">Removed</a>.</p>` +
+        `<p>These DAGs are the ones to check first when "I deployed, but the UI didn't update".</p>`,
+    },
+    removed: {
+      term: "Removed (is_stale)",
+      short: "Airflow marked this DAG stale (is_stale = true): its file is no longer in the bundle, so it is not parsed any more. Excluded from all parse statistics.",
+      detail: `<p>Airflow sets <code>dag.is_stale = true</code> when a DAG's file is no longer found in the bundle, for example because the file was deleted or renamed, or the DAG was moved to another file. The DAG stays in the metadata database but is <b>no longer parsed</b>, so its <code>last_parsed_time</code> keeps getting older and its parse time is out of date.</p>` +
+        `<p>This report <b>excludes removed DAGs from every parse statistic</b> (totals, percentiles, loop estimate, charts). They're listed in their own section instead. They don't slow down parsing, but they clutter the UI and the database. Consider cleaning them up, for example by deleting them from the UI or with <code>airflow dags delete</code>.</p>`,
+    },
+    age: {
+      term: "Age",
+      short: `Time from this DAG's last parse to the newest parse in the export (${R.reference_time ?? "n/a"}). This is not the parse duration.`,
+      detail: `<p>Age = the newest <code>last_parsed_time</code> in the export (${REF}) − this DAG's <code>last_parsed_time</code>. It tells you how long ago the DAG was last parsed, measured at the moment the export was taken.</p>` +
+        `<p>It is <b>not</b> the parse time. <b>Parse</b> is how long that one parse took, for example 307 s. <b>Age</b> is how long it has been since that parse finished, for example 20.2 h. In other words, Age is how long the DAG has been waiting for its next parse so far.</p>` +
+        `<p>Every file is re-parsed once per loop, so in a healthy setup Age should be no longer than one parse loop (≈ ${duration(S.estimated_loop_seconds)} here). If Age is much longer than the loop, the processor isn't reaching that file as often as expected. Once Age of an active DAG goes past ${CFG.overdue_hours} h, the DAG is flagged as <a href="#term-overdue">overdue</a>. For <a href="#term-removed">removed</a> DAGs, Age only shows how long ago the file disappeared.</p>` +
+        `<p><code>last_parsed_time</code> is written when the processor saves the parse result, so it's close to when the parse finished.</p>`,
+    },
+    changed: {
+      term: "Last changed",
+      short: "When the DAG's latest version was saved, i.e. the last parse that found a real change. Compare it with your deploy time.",
+      detail: `<p>The <code>version_created_at</code> of the DAG's latest version: the last time a parse found that the DAG had actually changed and saved a new version. From that moment the change is in the database, and the UI shows it within about a minute (<code>min_serialized_dag_update_interval</code> + <code>min_serialized_dag_fetch_interval</code>).</p>` +
+        `<p><b>"I deployed at T. Is it live?"</b> Compare with <b>Last parsed</b>:</p>` +
+        `<ul><li><b>Last changed ≥ T</b>: picked up. The change is live.</li>` +
+        `<li><b>Last changed &lt; T and Last parsed &lt; T</b>: not parsed since the deploy. It's still waiting in the queue (see <a href="#term-observed">observed parse loop</a>).</li>` +
+        `<li><b>Last changed &lt; T but Last parsed ≥ T</b>: parsed after the deploy, but no new version. Either the change didn't alter the DAG structure (for example, only code inside a task changed), or the file hadn't synced from blob storage yet when it was parsed.</li></ul>` +
+        `<p>In the All DAGs table, a <b>blue dot and left bar</b> mark DAGs whose latest parse saved a new version; a <b>grey ring</b> marks DAGs parsed with no new version.</p>` +
+        `<p><b>Caveat:</b> "no new version" doesn't always mean nothing changed. As far as we know, Airflow 3 may update the latest version in place instead of creating a new one when that version has no DAG runs yet; this still needs checking for 3.2.1. Adding <code>serialized_dag.last_updated</code> to the export would show every write.</p>`,
+    },
+    versions: {
+      term: "Versions",
+      short: "Number of serialized versions stored for this DAG. A high count often means the DAG changes on every parse.",
+      detail: `<p>The number of <code>dag_version</code> rows for the DAG. Airflow saves a new version whenever the serialized DAG changes. A high count without real code changes usually means the DAG's structure isn't deterministic, for example because it uses <code>datetime.now()</code>, random values, or task lists built from external data at the top level. Each new version adds database writes to every parse.</p>`,
+    },
+  };
+  const GLOSSARY_TH = {
+    parse: {
+      term: "เวลา parse",
+      short: "เวลาที่ DAG processor ใช้ import ไฟล์ Python ของ DAG นี้ในการ parse ครั้งล่าสุด",
+      detail: `<p>ค่า <code>parse_seconds</code> จากไฟล์ export คือเวลาที่ DAG processor ใช้ import ไฟล์ Python ของ DAG ในการ parse ครั้งล่าสุด ระหว่างที่ไฟล์กำลังถูก parse ไฟล์นั้นจะใช้ parsing process ไปหนึ่งตัว ไฟล์ที่ช้าจึงทำให้ไฟล์อื่นที่รอคิวอยู่ช้าตามไปด้วย</p>`,
+    },
+    percentiles: {
+      term: "p50 / p90 / p99",
+      short: "DAG ที่ parse แล้ว 50%, 90% และ 99% ใช้เวลา parse ไม่เกินค่านี้",
+      detail: `<p>ค่าเปอร์เซ็นไทล์ของเวลา parse คำนวณจาก DAG ที่มีเวลา parse บันทึกไว้ p50 (ค่ามัธยฐาน) หมายถึงครึ่งหนึ่งของ DAG ใช้เวลา parse ไม่เกินค่านี้ ส่วน p90 และ p99 บอกถึงกลุ่มที่ช้าที่สุด</p>`,
+    },
+    loop: {
+      term: "ประมาณเวลา parse ครบหนึ่งรอบ",
+      short: `เวลา parse รวม ÷ parsing_processes (${CFG.parsing_processes}) คือเวลาโดยประมาณที่ใช้ parse ไฟล์ DAG ทั้งหมดครบหนึ่งรอบ`,
+      detail: `<p>เวลา parse รวมของทุก DAG หารด้วย <code>parsing_processes</code> (${CFG.parsing_processes}${CFG.parsing_processes_assumed ? ASSUMED_TH : ""} กำหนดด้วย <code>--parsing-processes</code> หรือ <code>PARSING_PROCESSES</code>) คือเวลาโดยประมาณที่ DAG processor ใช้ parse ไฟล์ทั้งหมดใหม่ครบหนึ่งรอบ และเป็นเวลารอนานที่สุดโดยประมาณหลัง deploy กว่าการเปลี่ยนแปลงจะแสดงบน UI</p>` +
+        `<p>ค่านี้เป็นเพียงค่าประมาณ ยังไม่รวม <code>min_file_process_interval</code> เวลา refresh bundle และกรณีที่ไฟล์เดียวมีหลาย DAG</p>` +
+        `<p>ถ้ามี DAG processor มากกว่าหนึ่ง pod ให้นับเฉพาะ process ที่ parse ไฟล์<i>ต่างกัน</i> ถ้าหลาย pod parse bundle เดียวกัน งานจะซ้ำกัน ความขนานจริงจึงอาจน้อยกว่าจำนวน process รวม</p>`,
+    },
+    observed: {
+      term: "รอบการ parse ที่วัดได้จริง",
+      short: "เวลาจริงที่ใช้ parse DAG ที่ active ครบทุกตัว วัดจาก last_parsed_time: 99% ของ DAG ที่ active ถูก parse ใหม่ภายในเวลานี้ก่อนการ export",
+      detail: `<p>วัดจากข้อมูลจริง ไม่ได้คำนวณจาก config DAG ที่ active จะถูก parse ใหม่รอบละครั้ง ณ เวลาใดก็ตาม อายุของแต่ละ DAG (เวลาตั้งแต่ parse ครั้งล่าสุด) จึงไม่เกินหนึ่งรอบ วัดได้ 2 แบบ:</p>` +
+        `<ul><li><b>99% ถูก parse ใหม่ภายใน</b>: เปอร์เซ็นไทล์ที่ 99 ของอายุ DAG ที่ active ถือเป็นความยาวรอบในทางปฏิบัติ</li>` +
+        `<li><b>จากอัตราการ parse</b>: จำนวน DAG ที่ active ÷ จำนวน DAG ที่ถูก parse ในชั่วโมงล่าสุด</li></ul>` +
+        `<p>ไม่นับ DAG ที่ถูกลบแล้วและ DAG ที่เลยรอบ เพราะไม่ได้อยู่ในรอบการ parse <a href="#term-loop">รอบที่ประมาณจาก config</a> สมมติว่า <code>parsing_processes</code> ทุกตัว parse ไฟล์ต่างกันตลอดเวลา ถ้ารอบจริงนานกว่ามาก ให้ตรวจว่ามี DAG processor หลาย pod ที่ parse bundle เดียวกัน (ทำงานซ้ำ) มี overhead ต่อไฟล์ หรือมีผลจาก <code>min_file_process_interval</code> หรือไม่</p>` +
+        `<p>tooltip ในตาราง All DAGs ใช้ค่านี้ประมาณ<b>เวลาที่ DAG จะถูก parse ครั้งถัดไป</b>: parse ล่าสุด + รอบการ parse ที่วัดได้ เป็นค่าประมาณสูงสุด ไม่ใช่ตารางเวลาจริง</p>` +
+        `<p>ค่านี้มาจาก export ครั้งเดียว จึงเป็นภาพ ณ ช่วงเวลาหนึ่ง ควรเทียบหลาย export ก่อนสรุป</p>`,
+    },
+    suspect: {
+      term: "สงสัยว่าไม่คงที่ (non-deterministic)",
+      short: "DAG ที่ active และมี version ใหม่ ≥ 7 ครั้งใน 7 วัน หรือ ≥ 3 ครั้งใน 24 ชั่วโมง น่าจะเปลี่ยนทุกครั้งที่ parse ไม่ใช่เฉพาะตอน deploy",
+      detail: `<p>Airflow บันทึก version ใหม่เฉพาะเมื่อ serialized DAG ต่างจากการ parse ครั้งก่อน การ deploy ทำให้เกิด version ใหม่ไม่กี่ครั้ง DAG ที่มี version ใหม่ต่อเนื่อง โดยเฉพาะ<b>ช่วงวันหยุด</b>หรือ<b>ตอน parse ครั้งล่าสุด</b> มักมีโค้ดระดับบนสุดที่สร้าง DAG ต่างไปเล็กน้อยทุกครั้ง เช่น ใช้ <code>datetime.now()</code> ใน argument ค่าสุ่ม หรือสร้างรายการ task จาก API ฐานข้อมูล หรือ Variable</p>` +
+        `<p>ผลกระทบ: เขียนฐานข้อมูลทุกครั้งที่ parse ประวัติ version ใน UI รก และ DAG run ผูกกับ version ที่เปลี่ยนตลอด</p>` +
+        `<p>คอลัมน์: <b>24 ชม.</b> / <b>7 วัน</b> = จำนวน version ใหม่ในช่วงนั้น, <b>วันหยุด</b> = version ใหม่ในวันเสาร์-อาทิตย์ใน 7 วันล่าสุด, <b>ตอน parse ล่าสุด</b> = version ล่าสุดถูกบันทึกจากการ parse ครั้งล่าสุด เกณฑ์นี้เป็นการคาดการณ์ ทีมที่ deploy หลายครั้งต่อวันก็อาจติดอยู่ในรายการ ให้ดูคอลัมน์วันหยุดประกอบ</p>`,
+    },
+    timeout: {
+      term: "เกิน import timeout",
+      short: `parse ครั้งล่าสุดใช้เวลานานกว่า timeout (${LIMIT_TH}) ซึ่งเป็นค่าคงที่จาก config ของ Airflow ไม่ใช่ค่าเฉลี่ย Airflow จะหยุด import ที่ใช้เวลานานขนาดนี้และบันทึกเป็น import error`,
+      detail: `<p>เวลา parse ครั้งล่าสุดของ DAG นานกว่า <b>${LIMIT_TH}</b> ซึ่งเป็นค่าที่น้อยกว่าระหว่าง config 2 ตัวของ Airflow:</p>` +
+        `<ul><li><code>dagbag_import_timeout</code> = ${TIMEOUT_TH}${CFG.import_timeout_assumed ? ASSUMED_TH : ""} (<code>IMPORT_TIMEOUT</code>) จำกัดเวลา import ไฟล์ DAG</li>` +
+        `<li><code>dag_file_processor_timeout</code> = ${FP_TH}${CFG.file_processor_timeout_assumed ? ASSUMED_TH : ""} (<code>FILE_PROCESSOR_TIMEOUT</code>) จำกัดเวลาประมวลผลทั้งไฟล์</li></ul>` +
+        `<p>ถ้าตัวใดตัวหนึ่งหมดเวลา Airflow จะหยุดไฟล์นั้นและบันทึกเป็น <b>import error</b> ทำให้การเปลี่ยนแปลงของ DAG นั้นไม่ขึ้นบน UI</p>` +
+        `<p><b>ค่านี้ไม่ใช่ค่าเฉลี่ย</b> แต่เป็นค่าคงที่ที่ตั้งไว้ใน config ของ Airflow ในรายงานนี้ค่าเฉลี่ยเวลา parse คือ ${secs(S.mean)} และค่ามัธยฐานคือ ${secs(S.p50)} ซึ่งไม่มีผลต่อการตัดสินว่า DAG เกิน timeout หรือไม่</p>` +
+        (showHigherHint ? `<p>DAG กลุ่มนี้มีเวลา parse มากกว่า ${LIMIT_TH} แต่ไม่ถูกหยุด แปลว่าค่า timeout จริงบนเซิร์ฟเวอร์น่าจะตั้งไว้สูงกว่านี้ ให้รันรายงานใหม่ด้วยค่าจริงเพื่อให้ได้ตัวเลขที่ถูกต้อง</p>` : "") +
+        `<p>DAG ที่ยังไม่ถึง timeout ก็ทำให้รอบการ parse ยาวขึ้นได้มาก การ parse ช้าจึงเป็นปัญหาแม้ไม่มี DAG ไหนเกิน timeout เลย</p>` +
+        `<p><b>วิธีแก้ที่พบบ่อย:</b> ย้ายงานหนักออกจากโค้ดระดับบนสุด (top-level) เช่น การเรียกฐานข้อมูลหรือ API, <code>Variable.get()</code>, การ import library ขนาดใหญ่ และการอ่านไฟล์หรือเรียกเครือข่าย เพราะโค้ดระดับบนสุดจะทำงานทุกครั้งที่ parse</p>`,
+    },
+    missing: {
+      term: "ไม่มีเวลา parse",
+      short: "parse_seconds ว่าง: ยังไม่เคย parse สำเร็จ, import ไม่ผ่าน หรือไฟล์ถูกลบไปแล้ว",
+      detail: `<p>DAG มีอยู่ในฐานข้อมูล metadata แต่ไม่มีค่า <code>parse_seconds</code> สาเหตุที่เป็นไปได้: ยังไม่เคย parse สำเร็จ, ไฟล์ import ไม่ผ่านอยู่ในขณะนี้ (ดูที่ <b>Import Errors</b> บน Airflow UI) หรือไฟล์ไม่อยู่ใน bundle แล้ว DAG กลุ่มนี้ไม่ถูกนำไปคำนวณสถิติเวลา parse</p>`,
+    },
+    overdue: {
+      term: "เลยรอบ (Overdue)",
+      short: `DAG ที่ยัง active แต่ไม่ถูก parse ใหม่นานกว่า ${CFG.overdue_hours} ชั่วโมง นับจากการ parse ล่าสุดในไฟล์ export (${R.reference_time ?? "n/a"})`,
+      detail: `<p>DAG ที่ยัง <b>active</b> แต่ <code>last_parsed_time</code> เก่ากว่าการ parse ล่าสุดในไฟล์ export นี้ (${REF}) เกิน ${CFG.overdue_hours} ชั่วโมง (กำหนดด้วย <code>--overdue-hours</code>) อายุวัดเทียบกับเวลานั้น ไม่ใช่เวลาปัจจุบัน การรันรายงานซ้ำกับไฟล์ export เดิมจึงได้ผลเหมือนเดิม</p>` +
+        `<p>DAG ที่ active จะถูก parse ใหม่ทุกรอบ DAG ที่เลยรอบจึงเป็น DAG ที่ processor ไม่ได้วนมาถึงนานกว่ารอบปกติมาก สาเหตุที่เป็นไปได้: ไฟล์ import ไม่ผ่านแล้ว รอบการ parse ยาวผิดปกติ หรือ processor ค้าง DAG ที่ไฟล์ถูกลบไปแล้วไม่นับรวมในกลุ่มนี้ ดู <a href="#term-removed">ถูกลบแล้ว</a></p>` +
+        `<p>ถ้า deploy แล้ว UI ไม่อัปเดต ให้ตรวจ DAG กลุ่มนี้ก่อน</p>`,
+    },
+    removed: {
+      term: "ถูกลบแล้ว (is_stale)",
+      short: "Airflow ตั้ง is_stale = true ให้ DAG นี้: ไม่พบไฟล์ใน bundle แล้ว จึงไม่ถูก parse อีก และไม่ถูกนำไปคำนวณสถิติเวลา parse",
+      detail: `<p>Airflow ตั้งค่า <code>dag.is_stale = true</code> เมื่อไม่พบไฟล์ของ DAG ใน bundle แล้ว เช่น ไฟล์ถูกลบหรือเปลี่ยนชื่อ หรือย้าย DAG ไปอยู่ไฟล์อื่น DAG ยังอยู่ในฐานข้อมูล metadata แต่<b>ไม่ถูก parse อีก</b> <code>last_parsed_time</code> จึงเก่าลงเรื่อย ๆ และเวลา parse ที่บันทึกไว้ก็เป็นค่าเก่า</p>` +
+        `<p>รายงานนี้<b>ไม่นำ DAG กลุ่มนี้ไปคำนวณสถิติเวลา parse ใด ๆ</b> (เวลารวม เปอร์เซ็นไทล์ ประมาณรอบการ parse และกราฟ) แต่แยกแสดงไว้ในส่วนของตัวเอง DAG กลุ่มนี้ไม่ได้ทำให้การ parse ช้าลง แต่ทำให้ UI และฐานข้อมูลรก ควรพิจารณาลบออก เช่น ลบจาก UI หรือใช้ <code>airflow dags delete</code></p>`,
+    },
+    age: {
+      term: "อายุ (Age)",
+      short: `ระยะเวลาจากการ parse ครั้งล่าสุดของ DAG นี้ ถึงการ parse ล่าสุดในไฟล์ export (${R.reference_time ?? "n/a"}) ไม่ใช่เวลาที่ใช้ parse`,
+      detail: `<p>Age = <code>last_parsed_time</code> ล่าสุดในไฟล์ export (${REF}) − <code>last_parsed_time</code> ของ DAG นี้ หมายถึง DAG นี้ถูก parse ครั้งล่าสุดไปนานเท่าไรแล้ว ณ เวลาที่ export ข้อมูล</p>` +
+        `<p>ค่านี้<b>ไม่ใช่</b>เวลา parse: <b>Parse</b> คือเวลาที่ใช้ parse ครั้งนั้น (เช่น 307 วินาที) ส่วน <b>Age</b> คือเวลาที่ผ่านไปแล้วหลัง parse เสร็จ (เช่น 20.2 ชั่วโมง) หรือพูดง่าย ๆ คือ DAG นี้รอคิว parse รอบถัดไปมาแล้วนานเท่าไร</p>` +
+        `<p>ทุกไฟล์ควรถูก parse ใหม่รอบละครั้ง ถ้าระบบปกติ Age ไม่ควรเกินเวลา parse หนึ่งรอบ (ประมาณ ${duration(S.estimated_loop_seconds)} ในรายงานนี้) ถ้า Age นานกว่านั้นมาก แปลว่า processor วนมาถึงไฟล์นี้ไม่บ่อยอย่างที่ควร และถ้า DAG ที่ active มี Age เกิน ${CFG.overdue_hours} ชั่วโมงจะถูกนับเป็น <a href="#term-overdue">เลยรอบ (overdue)</a> ส่วน DAG ที่<a href="#term-removed">ถูกลบแล้ว</a> Age บอกแค่ว่าไฟล์หายไปนานแค่ไหน</p>` +
+        `<p><code>last_parsed_time</code> ถูกบันทึกตอนที่ processor บันทึกผล parse จึงใกล้เคียงกับเวลาที่ parse เสร็จ</p>`,
+    },
+    changed: {
+      term: "เปลี่ยนล่าสุด (Last changed)",
+      short: "เวลาที่บันทึก version ล่าสุดของ DAG คือการ parse ครั้งล่าสุดที่พบการเปลี่ยนแปลงจริง ใช้เทียบกับเวลาที่ deploy",
+      detail: `<p>ค่า <code>version_created_at</code> ของ version ล่าสุด คือครั้งล่าสุดที่การ parse พบว่า DAG เปลี่ยนจริงและบันทึก version ใหม่ ตั้งแต่เวลานั้นการเปลี่ยนแปลงอยู่ในฐานข้อมูลแล้ว และจะขึ้นบน UI ภายในประมาณ 1 นาที (<code>min_serialized_dag_update_interval</code> + <code>min_serialized_dag_fetch_interval</code>)</p>` +
+        `<p><b>"deploy ตอนเวลา T แล้ว ขึ้นหรือยัง?"</b> ให้ดูคู่กับ <b>Last parsed</b>:</p>` +
+        `<ul><li><b>Last changed ≥ T</b>: ถูก parse แล้ว การเปลี่ยนแปลงขึ้น UI แล้ว</li>` +
+        `<li><b>Last changed &lt; T และ Last parsed &lt; T</b>: ยังไม่ถูก parse หลัง deploy ยังรอคิวอยู่ (ดู <a href="#term-observed">รอบการ parse ที่วัดได้จริง</a>)</li>` +
+        `<li><b>Last changed &lt; T แต่ Last parsed ≥ T</b>: parse หลัง deploy แล้วแต่ไม่มี version ใหม่ อาจเพราะการแก้ไม่ได้เปลี่ยนโครงสร้าง DAG (เช่นแก้แค่โค้ดข้างใน task) หรือไฟล์ยัง sync จาก blob storage ไม่เสร็จตอนที่ parse</li></ul>` +
+        `<p>ในตาราง All DAGs <b>จุดสีฟ้าและแถบซ้าย</b> คือ DAG ที่ parse ล่าสุดบันทึก version ใหม่ ส่วน<b>วงกลมสีเทา</b>คือ DAG ที่ parse แล้วแต่ไม่มี version ใหม่</p>` +
+        `<p><b>ข้อควรระวัง:</b> "ไม่มี version ใหม่" ไม่ได้แปลว่าไม่มีอะไรเปลี่ยนเสมอไป เท่าที่ทราบ Airflow 3 อาจเขียนทับ version ล่าสุดแทนการสร้าง version ใหม่ ถ้า version นั้นยังไม่เคยมี DAG run (ต้องตรวจกับ 3.2.1 อีกครั้ง) ถ้าเพิ่ม <code>serialized_dag.last_updated</code> ใน export จะเห็นการเขียนทุกครั้ง</p>`,
+    },
+    versions: {
+      term: "จำนวนเวอร์ชัน",
+      short: "จำนวน serialized version ที่เก็บไว้ของ DAG นี้ ถ้าสูงมักแปลว่า DAG เปลี่ยนทุกครั้งที่ parse",
+      detail: `<p>จำนวนแถวใน <code>dag_version</code> ของ DAG นั้น Airflow จะบันทึกเวอร์ชันใหม่ทุกครั้งที่ serialized DAG เปลี่ยน ถ้าจำนวนสูงทั้งที่โค้ดไม่ได้เปลี่ยนจริง มักแปลว่าโครงสร้าง DAG ไม่คงที่ (non-deterministic) เช่น ใช้ <code>datetime.now()</code> ค่าสุ่ม หรือสร้างรายการ task จากข้อมูลภายนอกในโค้ดระดับบนสุด ทุกเวอร์ชันใหม่จะเพิ่มการเขียนฐานข้อมูลในทุกการ parse</p>`,
+    },
+  };
+  const GLOSSARY = { en: GLOSSARY_EN, th: GLOSSARY_TH };
+  const LANGS = ["both", "en", "th"];
+  let lang = "both";
+  try { lang = LANGS.includes(localStorage.getItem("report-lang")) ? localStorage.getItem("report-lang") : "both"; } catch (_) {}
+
+  // Bilingual text: notes/tooltips show both languages in "both" mode; axis names are too tight for that.
+  const tr = (en, th) => lang === "both" ? `${en}<span class="note-th" lang="th">${th}</span>` : lang === "th" ? `<span lang="th">${th}</span>` : en;
+  const trTip = (en, th) => lang === "both" ? `${en}<br><span style="color:${css("--ink-2")}">${th}</span>` : lang === "th" ? th : en;
+  const trAxis = (en, th) => lang === "th" ? th : en;
+
+  const shortText = (key) => lang === "both"
+    ? `${GLOSSARY.en[key].short}\n${GLOSSARY.th[key].short}`
+    : GLOSSARY[lang][key].short;
+  const info = (key) => `<a class="info" href="#term-${key}" title="${esc(shortText(key))}" aria-label="What is ${esc(GLOSSARY.en[key].term)}?">ⓘ</a>`;
+
+  function renderGlossary() {
+    $("glossary-list").innerHTML = Object.keys(GLOSSARY_EN).map((key) => {
+      const en = GLOSSARY.en[key], th = GLOSSARY.th[key];
+      const term = lang === "both" && th.term !== en.term ? `${esc(en.term)}<span class="term-th" lang="th">${esc(th.term)}</span>`
+        : lang === "th" ? `<span lang="th">${esc(th.term)}</span>` : esc(en.term);
+      const detail = lang === "both" ? `<div lang="en">${en.detail}</div><div class="th-block" lang="th">${th.detail}</div>`
+        : lang === "th" ? `<div lang="th">${th.detail}</div>` : `<div lang="en">${en.detail}</div>`;
+      return `<dt id="term-${key}">${term}</dt><dd>${detail}</dd>`;
+    }).join("");
+    document.querySelectorAll("#lang-switch button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.lang === lang)));
+  }
+
+  const tiles = [
+    { label: R.has_removed_flag ? "Active DAGs" : "DAGs", value: int(S.dag_count), sub: `${int(S.file_count)} files · ${int(S.application_count)} applications` },
+    { label: "Estimated full parse loop", term: "loop", value: duration(S.estimated_loop_seconds), sub: `Σ ${duration(S.total_parse_seconds)} ÷ ${CFG.parsing_processes} processes${CFG.parsing_processes_assumed ? " (assumed)" : ""}` },
+    { label: "Observed parse loop", term: "observed", value: O.sample ? duration(O.age_p99_hours * 3600) : "—",
+      sub: O.ratio_to_estimate ? `99% re-parsed within · ${num(O.ratio_to_estimate, 1)}× the estimate` : "99% re-parsed within",
+      alert: (O.ratio_to_estimate ?? 0) >= 1.5 },
+    { label: "Median parse time (p50)", term: "parse", value: secs(S.p50), sub: `mean ${secs(S.mean)}` },
+    { label: "p90 / p99", term: "percentiles", value: `${num(S.p90, 0)} / ${num(S.p99, 0)} s`, sub: `max ${secs(S.max)}` },
+    { label: `Over timeout · > ${LIMIT_EN}`, term: "timeout", value: int(S.over_timeout_count), sub: pct(S.over_timeout_count / Math.max(S.parsed_count, 1) * 100) + " of parsed DAGs" + (CFG.import_timeout_assumed || CFG.file_processor_timeout_assumed ? " · limit assumed" : ""), alert: S.over_timeout_count > 0 },
+    { label: "No parse time", term: "missing", value: int(S.missing_count), sub: "never parsed or import error", alert: S.missing_count > 0 },
+    { label: `Overdue (> ${CFG.overdue_hours} h)`, term: "overdue", value: int(S.overdue_count), sub: "active, not re-parsed", alert: S.overdue_count > 0 },
+    ...(R.has_version_history ? [{ label: "Non-deterministic suspects", term: "suspect", value: int(S.suspect_count), sub: `${int(S.changed_24h_count)} DAGs changed in 24 h · ${int(S.changed_7d_count)} in 7 d`, alert: S.suspect_count > 0 }] : []),
+    ...(R.has_removed_flag ? [{ label: "Removed (is_stale)", term: "removed", value: int(S.removed_count), sub: "file gone · excluded from stats" }] : []),
+    { label: "Max versions per DAG", term: "versions", value: int(S.max_versions), sub: `${int(S.version_rows)} versions in total` },
+  ];
+  function renderTiles() {
+    $("tiles").innerHTML = tiles.map((t) =>
+      `<div class="tile${t.alert ? " alert" : ""}"${t.term ? ` title="${esc(shortText(t.term))}"` : ""}>` +
+      `<div class="label">${esc(t.label)}${t.term ? info(t.term) : ""}</div>` +
+      `<div class="value">${esc(t.value)}</div><div class="sub">${esc(t.sub)}</div></div>`).join("");
+  }
+
+  const top = R.slowest.map((i) => dags[i]);
+  const topShare = top.reduce((a, d) => a + d.parse_seconds, 0) / Math.max(S.total_parse_seconds, 1) * 100;
+  $("note-slowest").innerHTML = `The top <strong>${top.length}</strong> DAGs take <strong>${pct(topShare)}</strong> of total parse time. ` +
+    `The red line is <code>dagbag_import_timeout</code> (<a href="#term-timeout">what does over timeout mean?</a>). Hover over a bar for details.`;
+  const P = R.pareto;
+  function renderAssumptions() {
+    const items = [];
+    if (CFG.import_timeout_assumed) items.push({ en: `<code>dagbag_import_timeout</code> = <strong>${TIMEOUT_EN}</strong>`, th: `<code>dagbag_import_timeout</code> = <strong>${TIMEOUT_TH}</strong>` });
+    if (CFG.file_processor_timeout_assumed) items.push({ en: `<code>dag_file_processor_timeout</code> = <strong>${FP_EN}</strong>`, th: `<code>dag_file_processor_timeout</code> = <strong>${FP_TH}</strong>` });
+    if (CFG.parsing_processes_assumed) items.push({ en: `<code>parsing_processes</code> = <strong>${CFG.parsing_processes}</strong>`, th: `<code>parsing_processes</code> = <strong>${CFG.parsing_processes}</strong>` });
+    const el = $("assumptions");
+    el.hidden = items.length === 0;
+    if (!items.length) return;
+    el.innerHTML = tr(
+      `These values are Airflow's defaults, not your server's real settings: ${items.map((i) => i.en).join(", ")}. ` +
+        `The over-timeout count and the full-loop estimate depend on them. To use the real values, run: <code>IMPORT_TIMEOUT=&lt;seconds&gt; FILE_PROCESSOR_TIMEOUT=&lt;seconds&gt; PARSING_PROCESSES=&lt;n&gt; ./generate-report.sh</code>`,
+      `ค่าต่อไปนี้เป็นค่าเริ่มต้นของ Airflow ไม่ใช่ค่าจริงบนเซิร์ฟเวอร์: ${items.map((i) => i.th).join(", ")} ` +
+        `จำนวน DAG ที่เกิน timeout และเวลาประมาณของการ parse ครบหนึ่งรอบขึ้นอยู่กับค่าเหล่านี้ ถ้าต้องการใช้ค่าจริง ให้รัน <code>IMPORT_TIMEOUT=&lt;วินาที&gt; FILE_PROCESSOR_TIMEOUT=&lt;วินาที&gt; PARSING_PROCESSES=&lt;จำนวน&gt; ./generate-report.sh</code>`);
+  }
+
+  function renderSectionNotes() {
+    renderAssumptions();
+    const est = duration(S.estimated_loop_seconds);
+    const obs = duration(O.age_p99_hours * 3600);
+    const rate = O.loop_from_rate_hours != null ? duration(O.loop_from_rate_hours * 3600) : "—";
+    const ratio = O.ratio_to_estimate != null ? num(O.ratio_to_estimate, 1) : "—";
+    $("note-loop").innerHTML = tr(
+      `From config, one full pass should take about <strong>${est}</strong> (Σ parse ÷ ${CFG.parsing_processes} processes). The data shows 99% of active DAGs re-parsed within <strong>${obs}</strong>, and the last hour's parse rate implies <strong>${rate}</strong>. That's <strong>${ratio}×</strong> the estimate. <a href="#term-observed">How is this measured?</a>`,
+      `จาก config การ parse ครบหนึ่งรอบควรใช้ประมาณ <strong>${est}</strong> (เวลา parse รวม ÷ ${CFG.parsing_processes} processes) แต่ข้อมูลจริงแสดงว่า 99% ของ DAG ที่ active ถูก parse ใหม่ภายใน <strong>${obs}</strong> และอัตราการ parse ในชั่วโมงล่าสุดคิดเป็นรอบละ <strong>${rate}</strong> หรือ <strong>${ratio} เท่า</strong>ของค่าประมาณ <a href="#term-observed">วัดอย่างไร?</a>`);
+    $("loop-compare-title").innerHTML = tr("Loop length (hours)", `<span lang="th">ความยาวรอบ (ชั่วโมง)</span>`);
+    $("activity-title").innerHTML = tr("Active DAGs by time of their latest parse (10-min bins)", `<span lang="th">DAG ที่ active ตามเวลาที่ parse ครั้งล่าสุด (ช่วงละ 10 นาที)</span>`);
+    $("note-suspects").innerHTML = tr(
+      `<strong>${int(S.suspect_count)}</strong> active DAGs keep producing new versions (≥ 7 in 7 days or ≥ 3 in 24 hours), which suggests the DAG changes on every parse. New versions on weekends are a strong sign. <a href="#term-suspect">What does this mean and how do I fix it?</a>`,
+      `DAG ที่ active <strong>${int(S.suspect_count)}</strong> ตัวมี version ใหม่ต่อเนื่อง (≥ 7 ครั้งใน 7 วัน หรือ ≥ 3 ครั้งใน 24 ชั่วโมง) แสดงว่า DAG น่าจะเปลี่ยนทุกครั้งที่ parse ถ้ามี version ใหม่ในวันหยุดด้วย ยิ่งเป็นสัญญาณชัด <a href="#term-suspect">หมายความว่าอะไร และแก้อย่างไร?</a>`);
+    $("suspects-chart-title").innerHTML = tr("New versions in the last 7 days", `<span lang="th">version ใหม่ใน 7 วันล่าสุด</span>`);
+    $("suspects-table-title").innerHTML = tr("Suspects", `<span lang="th">รายการ DAG ที่สงสัย</span>`);
+    renderRemovedCount();
+    $("note-removed").innerHTML = tr(
+      `<strong>${int(S.removed_count)}</strong> DAGs are marked <code>is_stale</code> by Airflow. Their file is no longer in the bundle, so they're not parsed any more and are <b>excluded from every statistic above</b>. ${int(S.removed_missing_count)} of them never had a parse time. They're candidates for cleanup. <a href="#term-removed">More about removed DAGs</a>.`,
+      `DAG <strong>${int(S.removed_count)}</strong> ตัวถูก Airflow ตั้งเป็น <code>is_stale</code> เพราะไม่พบไฟล์ใน bundle แล้ว จึงไม่ถูก parse อีก และ<b>ไม่ถูกนำไปคำนวณสถิติด้านบน</b> ในจำนวนนี้ ${int(S.removed_missing_count)} ตัวไม่เคยมีเวลา parse เลย ควรพิจารณาลบออก <a href="#term-removed">อ่านเพิ่มเติม</a>`);
+    renderAppNote();
+    const within = pct(100 - S.over_timeout_count / Math.max(S.parsed_count, 1) * 100);
+    const for80 = pct(P.dags_for_80 / Math.max(S.parsed_count, 1) * 100);
+    $("note-histogram").innerHTML = tr(
+      `The bins are on a log scale. Half of the DAGs parse in under <strong>${secs(S.p50)}</strong> and 90% in under <strong>${secs(S.p90)}</strong>. Click a bin to list its DAGs.`,
+      `แต่ละช่วงของกราฟแบ่งแบบ log scale ครึ่งหนึ่งของ DAG ใช้เวลา parse ไม่เกิน <strong>${secs(S.p50)}</strong> และ 90% ไม่เกิน <strong>${secs(S.p90)}</strong> คลิกที่แท่งกราฟเพื่อดูรายชื่อ DAG ในช่วงนั้น`);
+    $("note-ecdf").innerHTML = tr(
+      `Read any point on the line: the share of DAGs (y axis) that parse within the time on the x axis. <strong>${within}</strong> finish within the ${LIMIT_EN} timeout used by this report (<a href="#term-timeout">where does this value come from?</a>).`,
+      `อ่านค่าจากจุดใดก็ได้บนเส้น: แกนตั้งคือสัดส่วนของ DAG ที่ parse เสร็จภายในเวลาตามแกนนอน DAG <strong>${within}</strong> parse เสร็จภายใน timeout ${LIMIT_TH} ที่รายงานนี้ใช้ (<a href="#term-timeout">ค่านี้มาจากไหน?</a>)`);
+    $("note-pareto").innerHTML = tr(
+      `<strong>${int(P.dags_for_80)}</strong> DAGs (${for80}) account for 80% of parse time, and the slowest 10% of DAGs account for <strong>${pct(P.top_10pct_share)}</strong>. Fix these first to shorten the parse loop.`,
+      `DAG <strong>${int(P.dags_for_80)}</strong> ตัว (${for80}) ใช้เวลา 80% ของเวลา parse ทั้งหมด และ DAG ที่ช้าที่สุด 10% ใช้เวลา <strong>${pct(P.top_10pct_share)}</strong> ของทั้งหมด ควรแก้กลุ่มนี้ก่อนเพื่อให้รอบการ parse สั้นลง`);
+    $("note-env").innerHTML = tr(
+      "Total parse time for each environment (taken from the dag_id suffix).",
+      "เวลา parse รวมของแต่ละ environment (ดูจากคำท้ายของ dag_id)");
+  }
+  const renderAppNote = () => $("note-app").innerHTML = tr(
+    `The top ${R.by_application.length} of ${R.application_count} applications, ranked by total parse time. The x axis on the right is log scale, and the red line is the timeout. <strong>Click a bar, a box or an application name to see its DAGs.</strong>`,
+    `${R.by_application.length} application จากทั้งหมด ${R.application_count} ที่ใช้เวลา parse รวมมากที่สุด แกนนอนของกราฟด้านขวาเป็น log scale และเส้นสีแดงคือ timeout <strong>คลิกที่แท่งกราฟ กล่อง หรือชื่อ application เพื่อดูรายละเอียด DAG</strong>`);
+  const churned = dags.filter((d) => !d.removed && d.versions > 1).length;
+  $("note-churn").innerHTML = `<strong>${int(churned)}</strong> DAGs have more than one serialized version. A high version count often means the DAG file isn't deterministic (for example, it uses <code>datetime.now()</code> or random values at the top level), so every parse creates a new version. <a href="#term-versions">More about versions</a>.`;
+  $("note-freshness").innerHTML = (R.has_removed_flag ? "Active DAGs only. " : "") + `Age is measured from each DAG's <code>last_parsed_time</code> to the newest parse in the export (${esc(R.reference_time ?? "n/a")}). Active DAGs older than ${CFG.overdue_hours} h are <a href="#term-overdue">overdue</a>.`;
+
+  // ---------- charts ----------
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const charts = [];
+  const narrow = () => window.innerWidth < 860;
+
+  function theme() {
+    return {
+      ink: css("--ink"), ink2: css("--ink-2"), muted: css("--muted"), grid: css("--grid"), axis: css("--axis"),
+      surface: css("--surface"), s1: css("--series-1"), s1soft: css("--series-1-soft"), s2: css("--series-2"),
+      critical: css("--critical"), neutral: css("--neutral"),
+    };
+  }
+
+  function base(t) {
+    return {
+      animationDuration: 300,
+      textStyle: { fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif', color: t.ink2 },
+      tooltip: {
+        backgroundColor: t.surface, borderColor: t.axis, borderWidth: 1,
+        textStyle: { color: t.ink, fontSize: 12 }, extraCssText: "box-shadow:0 4px 16px rgba(0,0,0,.15);border-radius:8px;",
+        confine: true,
+      },
+      grid: { left: 12, right: 28, top: 40, bottom: 36, containLabel: true },
+    };
+  }
+
+  const tick = (v) => v >= 1 ? int(Math.round(v * 100) / 100) : String(Math.round(v * 1000) / 1000);
+
+  function valueAxis(t, name, extra = {}) {
+    return Object.assign({
+      type: "value", name, nameLocation: "middle", nameGap: 28, nameTextStyle: { color: t.ink2 },
+      axisLine: { show: true, lineStyle: { color: t.axis } }, axisTick: { show: false },
+      axisLabel: { color: t.muted, fontSize: 11, formatter: tick, showMinLabel: extra.type !== "log", showMaxLabel: extra.type !== "log" },
+      splitLine: { lineStyle: { color: t.grid } },
+    }, extra);
+  }
+
+  function yValueAxis(t, name, extra = {}) {
+    return valueAxis(t, name, Object.assign({
+      nameLocation: "end", nameGap: 12, nameTextStyle: { color: t.ink2, align: "left", padding: [0, 0, 0, -24] },
+    }, extra));
+  }
+
+  function categoryAxis(t, data, extra = {}) {
+    return Object.assign({
+      type: "category", data, axisLine: { lineStyle: { color: t.axis } }, axisTick: { show: false },
+      axisLabel: { color: t.ink2, fontSize: 11 },
+    }, extra);
+  }
+
+  function refLine(t, value, label, color, axis = "xAxis", position = axis === "xAxis" ? "end" : "insideEndTop") {
+    return {
+      [axis]: value, lineStyle: { color, type: "dashed", width: 1.5 },
+      label: { formatter: label, color: t.ink2, fontSize: 11, position },
+    };
+  }
+  // Drawn low along the line so it never collides with the percentile labels at the top.
+  const timeoutLine = (t) => refLine(t, R.timeout_limit, `timeout ${LIMIT_EN}`, t.critical, "xAxis", "insideStartTop");
+
+  function mount(id, option, onClick) {
+    const el = $(id);
+    const chart = echarts.init(el, null, { renderer: "canvas" });
+    chart.setOption(option);
+    if (onClick) chart.on("click", onClick);
+    charts.push(chart);
+    return chart;
+  }
+
+  const labelWidth = () => narrow() ? 130 : 300;
+  const dagTooltip = (d) =>
+    `<b>${esc(d.dag_id)}</b><br>Parse: <b>${secs(d.parse_seconds)}</b><br>` +
+    `App: ${esc(d.application)} · Env: ${esc(d.environment)}<br>Versions: ${int(d.versions)} · Last parsed: ${esc(d.last_parsed ?? "—")}<br>` +
+    `<span style="color:${css("--muted")}">${esc(d.fileloc)}</span>`;
+
+  function horizontalBars(id, t, rows, value, axisName, tooltip, extraSeries = {}) {
+    $(id).style.height = Math.max(240, rows.length * 24 + 70) + "px";
+    return mount(id, Object.assign(base(t), {
+      tooltip: Object.assign(base(t).tooltip, { trigger: "item", formatter: (p) => tooltip(rows[p.dataIndex]) }),
+      xAxis: valueAxis(t, axisName),
+      yAxis: categoryAxis(t, rows.map((r) => r.dag_id ?? r.name), {
+        inverse: true, axisLabel: { color: t.ink2, fontSize: 11, width: labelWidth(), overflow: "truncate" },
+      }),
+      series: [Object.assign({
+        type: "bar", data: rows.map(value), barMaxWidth: 16, itemStyle: { color: t.s1, borderRadius: [0, 4, 4, 0] },
+        emphasis: { itemStyle: { color: t.s1soft } },
+      }, extraSeries)],
+    }));
+  }
+
+  function renderCharts() {
+    charts.splice(0).forEach((c) => c.dispose());
+    const t = theme();
+
+    // Parse loop comparison
+    const loopRows = [
+      { name: trAxis("Estimated (config)", "ประมาณจาก config"), hours: S.estimated_loop_seconds / 3600, observed: false },
+      { name: trAxis("Observed: parse rate", "วัดจริง: อัตราการ parse"), hours: O.loop_from_rate_hours, observed: true },
+      { name: trAxis("Observed: 99% re-parsed", "วัดจริง: 99% ถูก parse ใหม่"), hours: O.age_p99_hours, observed: true },
+    ].filter((r) => r.hours != null);
+    mount("chart-loop", Object.assign(base(t), {
+      grid: { left: 12, right: 60, top: 12, bottom: 36, containLabel: true },
+      tooltip: Object.assign(base(t).tooltip, { trigger: "item", formatter: (p) => `${esc(loopRows[p.dataIndex].name)}<br><b>${duration(loopRows[p.dataIndex].hours * 3600)}</b>` }),
+      xAxis: valueAxis(t, trAxis("Hours", "ชั่วโมง")),
+      yAxis: categoryAxis(t, loopRows.map((r) => r.name), { inverse: true }),
+      series: [{
+        type: "bar", barMaxWidth: 22,
+        data: loopRows.map((r) => ({ value: r.hours, itemStyle: { color: r.observed ? t.s1 : t.muted, borderRadius: [0, 4, 4, 0] } })),
+        label: { show: true, position: "right", color: t.ink2, fontSize: 11, formatter: (p) => duration(p.value * 3600) },
+      }],
+    }));
+
+    // Parse activity
+    const activity = R.parse_activity;
+    mount("chart-activity", Object.assign(base(t), {
+      grid: { left: 12, right: 12, top: 36, bottom: 36, containLabel: true },
+      tooltip: Object.assign(base(t).tooltip, {
+        trigger: "item",
+        formatter: (p) => `${esc(activity[p.dataIndex].start)} +10 min<br>` + trTip(`<b>${int(p.value)}</b> DAGs last parsed`, `DAG <b>${int(p.value)}</b> ตัว parse ครั้งล่าสุดในช่วงนี้`),
+      }),
+      xAxis: categoryAxis(t, activity.map((b) => b.start), { axisLabel: { color: t.muted, fontSize: 11, interval: "auto" } }),
+      yAxis: yValueAxis(t, trAxis("DAGs", "จำนวน DAG")),
+      series: [{ type: "bar", data: activity.map((b) => b.count), barCategoryGap: "20%", itemStyle: { color: t.s1, borderRadius: [4, 4, 0, 0] } }],
+    }));
+
+    // Non-deterministic suspects
+    if (R.has_version_history) {
+      const suspects = R.suspects.slice(0, CFG.top_n).map((i) => dags[i]);
+      if (suspects.length) {
+        horizontalBars("chart-suspects", t, suspects, (d) => d.versions_7d, trAxis("New versions in 7 days", "version ใหม่ใน 7 วัน"), suspectTooltip);
+      }
+    }
+
+    // Slowest DAGs
+    horizontalBars("chart-slowest", t, top, (d) => d.parse_seconds, "Parse time (seconds)", dagTooltip, {
+      markLine: { symbol: "none", silent: true, label: { show: false }, data: [refLine(t, R.timeout_limit, "", t.critical)] },
+    });
+
+    // Histogram (log bins drawn as rects on a log axis)
+    const bins = R.histogram;
+    mount("chart-histogram", Object.assign(base(t), {
+      tooltip: Object.assign(base(t).tooltip, {
+        trigger: "item",
+        formatter: (p) => `${secs(p.value[0])} – ${secs(p.value[1])}<br>` + trTip(`<b>${int(p.value[2])}</b> DAGs`, `DAG <b>${int(p.value[2])}</b> ตัว`),
+      }),
+      xAxis: valueAxis(t, trAxis("Parse time (seconds, log scale)", "เวลา parse (วินาที, log scale)"), { type: "log", min: bins[0]?.lo, max: bins[bins.length - 1]?.hi, splitLine: { show: false } }),
+      yAxis: yValueAxis(t, trAxis("DAGs", "จำนวน DAG")),
+      series: [{
+        type: "custom",
+        data: bins.map((b) => [b.lo, b.hi, b.count]),
+        encode: { x: [0, 1], y: 2 },
+        renderItem: (params, api) => {
+          const p0 = api.coord([api.value(0), 0]);
+          const p1 = api.coord([api.value(1), api.value(2)]);
+          return {
+            type: "rect",
+            shape: { x: p0[0] + 1, y: p1[1], width: Math.max(p1[0] - p0[0] - 2, 1), height: p0[1] - p1[1], r: [4, 4, 0, 0] },
+            style: { fill: t.s1 },
+            emphasis: { style: { fill: t.s1soft } },
+          };
+        },
+        markLine: {
+          symbol: "none", silent: true,
+          data: [
+            refLine(t, S.p50, "p50", t.muted), refLine(t, S.p90, "p90", t.muted), refLine(t, S.p99, "p99", t.muted),
+            timeoutLine(t),
+          ],
+        },
+      }],
+    }), (p) => showBin(bins[p.dataIndex]));
+
+    // ECDF
+    mount("chart-ecdf", Object.assign(base(t), {
+      tooltip: Object.assign(base(t).tooltip, {
+        trigger: "axis", axisPointer: { type: "cross", label: { backgroundColor: t.ink2 } },
+        formatter: (ps) => { const [x, y] = ps[0].value; return trTip(`<b>${pct(y)}</b> of DAGs parse in ≤ <b>${secs(x)}</b>`, `DAG <b>${pct(y)}</b> parse เสร็จภายใน ≤ <b>${secs(x)}</b>`); },
+      }),
+      xAxis: valueAxis(t, trAxis("Parse time (seconds, log scale)", "เวลา parse (วินาที, log scale)"), { type: "log", min: bins[0]?.lo, max: bins[bins.length - 1]?.hi }),
+      yAxis: yValueAxis(t, trAxis("% of DAGs", "% ของ DAG"), { min: 0, max: 100 }),
+      series: [{
+        type: "line", step: "end", showSymbol: false, data: R.ecdf, lineStyle: { color: t.s1, width: 2 }, itemStyle: { color: t.s1 },
+        markLine: {
+          symbol: "none", silent: true,
+          data: [refLine(t, S.p50, "p50", t.muted), refLine(t, S.p90, "p90", t.muted), timeoutLine(t)],
+        },
+      }],
+    }));
+
+    // Pareto
+    const n = P.cumulative_share.length;
+    mount("chart-pareto", Object.assign(base(t), {
+      legend: { top: 0, right: 0, textStyle: { color: t.ink2 }, itemWidth: 14, itemHeight: 2 },
+      grid: Object.assign(base(t).grid, { top: 48 }),
+      tooltip: Object.assign(base(t).tooltip, {
+        trigger: "axis",
+        formatter: (ps) => {
+          const i = Math.max(1, Math.round(ps[0].value[0] / 100 * n));
+          return trTip(`Slowest <b>${int(i)}</b> DAGs (${pct(i / n * 100)})<br>→ <b>${pct(P.cumulative_share[i - 1])}</b> of parse time`,
+            `DAG ที่ช้าที่สุด <b>${int(i)}</b> ตัว (${pct(i / n * 100)})<br>→ ใช้ <b>${pct(P.cumulative_share[i - 1])}</b> ของเวลา parse`);
+        },
+      }),
+      xAxis: valueAxis(t, trAxis("% of DAGs (slowest first)", "% ของ DAG (เรียงจากช้าที่สุด)"), { min: 0, max: 100 }),
+      yAxis: yValueAxis(t, trAxis("% of total parse time", "% ของเวลา parse รวม"), { min: 0, max: 100 }),
+      series: [
+        {
+          name: trAxis("Actual", "ค่าจริง"), type: "line", showSymbol: false, data: P.cumulative_share.map((s, i) => [(i + 1) / n * 100, s]),
+          lineStyle: { color: t.s1, width: 2 }, itemStyle: { color: t.s1 }, areaStyle: { color: t.s1, opacity: 0.08 },
+          markLine: { symbol: "none", silent: true, data: [refLine(t, 50, "50%", t.muted, "yAxis"), refLine(t, 80, "80%", t.muted, "yAxis")] },
+        },
+        { name: trAxis("Equal share", "กระจายเท่ากัน"), type: "line", showSymbol: false, data: [[0, 0], [100, 100]], lineStyle: { color: t.muted, width: 1.5, type: "dotted" }, itemStyle: { color: t.muted }, tooltip: { show: false } },
+      ],
+    }));
+
+    // Environment
+    const envs = R.by_environment;
+    horizontalBars("chart-env", t, envs, (g) => g.total_seconds / 3600, trAxis("Total parse time (hours)", "เวลา parse รวม (ชั่วโมง)"), groupTooltip);
+
+    // Applications: total + boxplot
+    const apps = R.by_application;
+    const appTotal = horizontalBars("chart-app-total", t, apps, (g) => g.total_seconds / 3600, "Total parse time (hours)", groupTooltip);
+    appTotal.setOption({ yAxis: { triggerEvent: true } });
+    appTotal.on("click", openAppFromChart);
+    $("chart-app-box").style.height = $("chart-app-total").style.height;
+    const floor = 0.01;
+    mount("chart-app-box", Object.assign(base(t), {
+      tooltip: Object.assign(base(t).tooltip, { trigger: "item", formatter: (p) => groupTooltip(apps[p.dataIndex]) }),
+      xAxis: valueAxis(t, "Parse time per DAG (seconds, log scale)", { type: "log" }),
+      yAxis: categoryAxis(t, apps.map((g) => g.name), { inverse: true, triggerEvent: true, axisLabel: { color: t.ink2, fontSize: 11, width: narrow() ? 110 : 140, overflow: "truncate" } }),
+      series: [{
+        type: "boxplot", boxWidth: [4, 12],
+        data: apps.map((g) => g.parsed ? [g.min, g.q1, g.median, g.q3, g.max].map((v) => Math.max(v, floor)) : "-"),
+        itemStyle: { color: t.s1soft, borderColor: t.s1, borderWidth: 1.5 },
+        markLine: { symbol: "none", silent: true, label: { show: false }, data: [refLine(t, R.timeout_limit, "", t.critical)] },
+      }],
+    }), openAppFromChart);
+
+    // Churn
+    const churn = R.churn.map((i) => dags[i]);
+    horizontalBars("chart-churn", t, churn, (d) => d.versions, "Serialized versions", dagTooltip);
+    $("chart-churn-scatter").style.height = $("chart-churn").style.height;
+    const scatterRows = dags.filter((d) => !d.removed && d.parse_seconds != null);
+    mount("chart-churn-scatter", Object.assign(base(t), {
+      tooltip: Object.assign(base(t).tooltip, { trigger: "item", formatter: (p) => dagTooltip(scatterRows[p.dataIndex]) }),
+      xAxis: valueAxis(t, "Versions (log scale)", { type: "log", min: 1 }),
+      yAxis: yValueAxis(t, "Parse time (seconds, log scale)", { type: "log" }),
+      series: [{
+        type: "scatter", symbolSize: 8, large: false,
+        data: scatterRows.map((d) => [d.versions, Math.max(d.parse_seconds, floor)]),
+        itemStyle: { color: t.s1, opacity: 0.55, borderColor: t.surface, borderWidth: 1 },
+        emphasis: { itemStyle: { opacity: 1, color: t.s2 } },
+      }],
+    }));
+
+    // Freshness
+    const fresh = R.freshness;
+    mount("chart-freshness", Object.assign(base(t), {
+      tooltip: Object.assign(base(t).tooltip, { trigger: "item", formatter: (p) => `${esc(p.name)}<br><b>${int(p.value)}</b> DAGs` }),
+      xAxis: categoryAxis(t, fresh.map((b) => b.label)),
+      yAxis: yValueAxis(t, "DAGs"),
+      series: [{
+        type: "bar", barMaxWidth: 48,
+        data: fresh.map((b) => ({ value: b.count, itemStyle: { color: b.label === "Never parsed" ? t.muted : t.s1, borderRadius: [4, 4, 0, 0] } })),
+        label: { show: true, position: "top", color: t.ink2, fontSize: 11 },
+      }],
+    }));
+    // Removed by application
+    if (R.has_removed_flag && R.removed_by_application.length) {
+      const groups = R.removed_by_application.slice(0, CFG.top_n);
+      horizontalBars("chart-removed", t, groups, (g) => g.dags, trAxis("Removed DAGs", "จำนวน DAG ที่ถูกลบ"),
+        (g) => `<b>${esc(g.name)}</b><br>` + trTip(`${int(g.dags)} removed DAGs in ${int(g.files)} files`, `DAG ที่ถูกลบ ${int(g.dags)} ตัว จาก ${int(g.files)} ไฟล์`),
+        { itemStyle: { color: t.muted, borderRadius: [0, 4, 4, 0] } });
+    }
+
+    if (dialogApp) renderDialogChart();
+  }
+
+  function suspectTooltip(d) {
+    return `<b>${esc(d.dag_id)}</b><br>` + trTip(
+      `New versions: <b>${int(d.versions_24h)}</b> in 24 h · <b>${int(d.versions_7d)}</b> in 7 d (${int(d.weekend_versions_7d)} on weekends)<br>Changed at latest parse: ${d.changed_at_last_parse ? "yes" : "no"} · last change ${esc(d.last_changed ?? "—")}`,
+      `version ใหม่: <b>${int(d.versions_24h)}</b> ใน 24 ชม. · <b>${int(d.versions_7d)}</b> ใน 7 วัน (วันหยุด ${int(d.weekend_versions_7d)})<br>เปลี่ยนตอน parse ล่าสุด: ${d.changed_at_last_parse ? "ใช่" : "ไม่"} · เปลี่ยนล่าสุด ${esc(d.last_changed ?? "—")}`);
+  }
+
+  function groupTooltip(g) {
+    return `<b>${esc(g.name)}</b><br>` + trTip(
+      `DAGs: ${int(g.dags)} (${int(g.parsed)} parsed)<br>Total: <b>${duration(g.total_seconds)}</b><br>` +
+        `Median ${secs(g.median)} · p90 ${secs(g.p90)} · max ${secs(g.max)}<br>Over timeout: ${int(g.over_timeout)}`,
+      `DAG: ${int(g.dags)} ตัว (parse แล้ว ${int(g.parsed)})<br>รวม: <b>${duration(g.total_seconds)}</b><br>` +
+        `มัธยฐาน ${secs(g.median)} · p90 ${secs(g.p90)} · สูงสุด ${secs(g.max)}<br>เกิน timeout: ${int(g.over_timeout)}`);
+  }
+
+  // ---------- histogram bin drill-down ----------
+  function miniTable(rows, cols) {
+    return `<table><thead><tr>${cols.map((c) => `<th class="${c.num ? "num" : ""}"${c.term ? ` title="${esc(shortText(c.term))}"` : ""}>${c.label}</th>`).join("")}</tr></thead><tbody>` +
+      rows.map((r) => `<tr>${cols.map((c) => `<td class="${c.num ? "num" : c.id ? "id" : ""}" ${c.id ? `title="${esc(r.dag_id)}"` : ""}>${c.render(r)}</td>`).join("")}</tr>`).join("") +
+      `</tbody></table>`;
+  }
+  const COL = {
+    id: { label: "DAG id", id: true, render: (d) => esc(d.dag_id) },
+    app: { label: "Application", render: (d) => esc(d.application) },
+    parse: { label: "Parse", term: "parse", num: true, render: (d) => secs(d.parse_seconds) },
+    age: { label: "Age", term: "age", num: true, render: (d) => hours(d.age_hours) },
+    last: { label: "Last parsed", render: (d) => esc(d.last_parsed ?? "—") },
+  };
+
+  let openBin = null;
+  function showBin(bin) {
+    openBin = bin;
+    const rows = dags.filter((d) => !d.removed && d.parse_seconds != null && d.parse_seconds >= bin.lo && d.parse_seconds < bin.hi)
+      .sort((a, b) => b.parse_seconds - a.parse_seconds);
+    $("bin-panel").innerHTML = `<p class="note">${tr(`<strong>${int(rows.length)}</strong> DAGs between ${secs(bin.lo)} and ${secs(bin.hi)}`, `DAG <strong>${int(rows.length)}</strong> ตัว ที่ใช้เวลา parse ระหว่าง ${secs(bin.lo)} ถึง ${secs(bin.hi)}`)}</p>` +
+      `<div class="table-wrap scroll">${miniTable(rows, [COL.id, COL.app, COL.parse])}</div>`;
+  }
+
+  const overdue = R.overdue.map((i) => dags[i]);
+  $("overdue-table").innerHTML = overdue.length
+    ? miniTable(overdue, [COL.id, COL.age, COL.last])
+    : `<p class="note">No active DAG is older than ${CFG.overdue_hours} h relative to the newest parse.</p>`;
+
+  $("section-suspects").hidden = !R.has_version_history;
+  const suspectRows = R.suspects.map((i) => dags[i]);
+  $("suspects-table").innerHTML = suspectRows.length
+    ? miniTable(suspectRows, [
+      COL.id,
+      { label: "24 h", num: true, term: "suspect", render: (d) => int(d.versions_24h) },
+      { label: "7 d", num: true, term: "suspect", render: (d) => int(d.versions_7d) },
+      { label: "Weekend", num: true, term: "suspect", render: (d) => int(d.weekend_versions_7d) },
+      { label: "At last parse", term: "suspect", render: (d) => d.changed_at_last_parse ? "✓" : "" },
+    ])
+    : `<p class="note">No suspects.</p>`;
+
+  const removedDags = R.removed.map((i) => dags[i]);
+  $("section-removed").hidden = !R.has_removed_flag;
+  $("removed-table").innerHTML = removedDags.length
+    ? miniTable(removedDags, [COL.id, COL.app, COL.last, COL.age])
+    : `<p class="note">No removed DAGs.</p>`;
+
+  function renderRemovedCount() {
+    const open = $("removed-details").open;
+    const hint = open ? { en: "click to hide", th: "คลิกเพื่อซ่อน" } : { en: "click to show", th: "คลิกเพื่อแสดง" };
+    $("removed-count").textContent = {
+      both: `${int(S.removed_count)} DAGs · ${hint.en} · ${hint.th}`,
+      en: `${int(S.removed_count)} DAGs · ${hint.en}`,
+      th: `${int(S.removed_count)} DAG · ${hint.th}`,
+    }[lang];
+  }
+
+  // The chart is initialised while collapsed, so it has no size until the section opens.
+  $("removed-details").addEventListener("toggle", (e) => {
+    renderRemovedCount();
+    if (e.currentTarget.open) echarts.getInstanceByDom($("chart-removed"))?.resize();
+  });
+
+  // The glossary starts collapsed; links to a definition open it first so the jump lands on visible text.
+  const openGlossaryFor = (hash) => { if (hash.startsWith("#term-")) $("glossary-details").open = true; };
+  document.addEventListener("click", (e) => {
+    const link = e.target.closest('a[href^="#term-"]');
+    if (!link) return;
+    if ($("app-dialog").open) $("app-dialog").close();
+    openGlossaryFor(link.getAttribute("href"));
+  });
+  openGlossaryFor(location.hash);
+
+  // ---------- application detail dialog ----------
+  let dialogChart = null;
+  let dialogApp = null;
+
+  function openAppFromChart(p) {
+    const name = p.componentType === "yAxis" ? p.value : R.by_application[p.dataIndex]?.name;
+    const group = R.by_application.find((g) => g.name === name);
+    if (group) openAppDialog(group);
+  }
+
+  function openAppDialog(g) {
+    dialogApp = g;
+    renderAppDialog();
+    const dialog = $("app-dialog");
+    if (!dialog.open) dialog.showModal();
+    renderDialogChart();
+  }
+
+  function renderAppDialog() {
+    const g = dialogApp;
+    const share = g.total_seconds / Math.max(S.total_parse_seconds, 1) * 100;
+    $("app-dialog-kicker").textContent = { both: "Application · แอปพลิเคชัน", en: "Application", th: "แอปพลิเคชัน" }[lang];
+    $("app-dialog-title").textContent = g.name;
+    const tiles = [
+      { en: "DAGs", th: "จำนวน DAG", value: int(g.dags), sub: tr(`${int(g.parsed)} parsed`, `parse แล้ว ${int(g.parsed)}`) },
+      { en: "Total parse time", th: "เวลา parse รวม", value: duration(g.total_seconds), sub: tr(`${pct(share)} of all DAGs`, `${pct(share)} ของทั้งหมด`) },
+      { en: "Median", th: "มัธยฐาน", value: secs(g.median), sub: tr(`mean ${secs(g.mean)}`, `เฉลี่ย ${secs(g.mean)}`) },
+      { en: "p90 / max", th: "p90 / สูงสุด", value: `${num(g.p90, 0)} / ${num(g.max, 0)} s` },
+      { en: "Over timeout", th: "เกิน timeout", value: int(g.over_timeout), sub: tr(`> ${LIMIT_EN}`, `> ${LIMIT_TH}`), alert: g.over_timeout > 0, term: "timeout" },
+      { en: "Overdue", th: "เลยรอบ", value: int(g.overdue), sub: tr(`> ${CFG.overdue_hours} h`, `> ${CFG.overdue_hours} ชม.`), alert: g.overdue > 0, term: "overdue" },
+      { en: "No parse time", th: "ไม่มีเวลา parse", value: int(g.missing), alert: g.missing > 0, term: "missing" },
+    ];
+    $("app-dialog-tiles").innerHTML = tiles.map((t) =>
+      `<div class="tile${t.alert ? " alert" : ""}"${t.term ? ` title="${esc(shortText(t.term))}"` : ""}>` +
+      `<div class="label">${tr(esc(t.en), esc(t.th))}</div><div class="value">${esc(t.value)}</div>` +
+      (t.sub ? `<div class="sub">${t.sub}</div>` : "") + `</div>`).join("");
+    $("app-dialog-box").innerHTML = g.parsed ? tr(
+      `Box plot values: min ${secs(g.min)} · Q1 ${secs(g.q1)} · median ${secs(g.median)} · Q3 ${secs(g.q3)} · max ${secs(g.max)}. Half of this application's DAGs parse between Q1 and Q3.`,
+      `ค่าในกล่อง: ต่ำสุด ${secs(g.min)} · Q1 ${secs(g.q1)} · มัธยฐาน ${secs(g.median)} · Q3 ${secs(g.q3)} · สูงสุด ${secs(g.max)} ครึ่งหนึ่งของ DAG ใน application นี้ใช้เวลา parse อยู่ระหว่าง Q1 ถึง Q3`) : "";
+    $("app-dialog-chart-title").innerHTML = tr("Each DAG's parse time (one dot per DAG)", `<span lang="th">เวลา parse ของแต่ละ DAG (หนึ่งจุดต่อหนึ่ง DAG)</span>`);
+    $("app-dialog-table-title").innerHTML = tr("DAGs, slowest first", `<span lang="th">รายการ DAG เรียงจากช้าที่สุด</span>`);
+    $("app-dialog-filter").textContent = lang === "th" ? "ดูในตาราง All DAGs" : "Show in All DAGs table";
+    const rows = appDags(g.name);
+    $("app-dialog-table").innerHTML = miniTable(rows, [
+      COL.id, { label: "Env", render: (d) => esc(d.environment) }, COL.parse,
+      { label: "Versions", num: true, render: (d) => int(d.versions) }, COL.last, COL.age,
+      { label: "Flags", render: flags },
+    ]);
+  }
+
+  // Filtering only; every statistic shown in the dialog comes precomputed from Rust.
+  const appDags = (name) => dags.filter((d) => !d.removed && d.application === name)
+    .sort((a, b) => (b.parse_seconds ?? -1) - (a.parse_seconds ?? -1));
+
+  function renderDialogChart() {
+    if (dialogChart) dialogChart.dispose();
+    const g = dialogApp;
+    const rows = appDags(g.name).filter((d) => d.parse_seconds != null);
+    if (!rows.length) { dialogChart = null; $("app-dialog-chart").innerHTML = ""; return; }
+    const t = theme();
+    dialogChart = echarts.init($("app-dialog-chart"));
+    dialogChart.setOption(Object.assign(base(t), {
+      grid: { left: 12, right: 28, top: 28, bottom: 36, containLabel: true },
+      tooltip: Object.assign(base(t).tooltip, { trigger: "item", formatter: (p) => dagTooltip(rows[p.dataIndex]) }),
+      xAxis: valueAxis(t, trAxis("Parse time (seconds, log scale)", "เวลา parse (วินาที, log scale)"), { type: "log" }),
+      // Deterministic jitter so overlapping DAGs stay visible and the layout doesn't shift between renders.
+      yAxis: { type: "value", min: 0, max: 1, show: false },
+      series: [{
+        type: "scatter", symbolSize: 9,
+        data: rows.map((d, i) => [Math.max(d.parse_seconds, 0.01), 0.15 + ((i * 0.618034) % 1) * 0.7]),
+        itemStyle: { color: t.s1, opacity: 0.65, borderColor: t.surface, borderWidth: 1 },
+        emphasis: { itemStyle: { opacity: 1, color: t.s2 } },
+        markArea: { silent: true, itemStyle: { color: t.s1, opacity: 0.08 }, label: { position: "insideTop", color: t.muted, fontSize: 11 }, data: [[{ name: "Q1–Q3", xAxis: Math.max(g.q1, 0.01) }, { xAxis: Math.max(g.q3, 0.01) }]] },
+        markLine: {
+          symbol: "none", silent: true,
+          data: [refLine(t, Math.max(g.median, 0.01), trAxis("median", "มัธยฐาน"), t.ink2), refLine(t, R.timeout_limit, `timeout ${LIMIT_EN}`, t.critical)],
+        },
+      }],
+    }));
+  }
+
+  $("app-dialog-close").addEventListener("click", () => $("app-dialog").close());
+  $("app-dialog").addEventListener("click", (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
+  $("app-dialog").addEventListener("close", () => { if (dialogChart) { dialogChart.dispose(); dialogChart = null; } dialogApp = null; });
+  $("app-dialog-filter").addEventListener("click", () => {
+    const name = dialogApp.name;
+    $("app-dialog").close();
+    $("f-app").value = name;
+    $("f-flag").value = "active";
+    state.limit = PAGE;
+    renderTable();
+    $("dag-table").scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+
+  // ---------- row summary tooltip (All DAGs) ----------
+  const durTh = (sec) => sec < 60 ? `${num(sec, 0)} วินาที` : sec < 3600 ? `${num(sec / 60, 0)} นาที` : `${num(sec / 3600, 1)} ชม.`;
+  const durEn = (sec) => sec < 60 ? `${num(sec, 0)} s` : sec < 3600 ? `${num(sec / 60, 0)} min` : `${num(sec / 3600, 1)} h`;
+
+  function rowSummary(d) {
+    const th = lang !== "en";
+    const t = (en, thText) => th ? thText : en;
+    const dur = th ? durTh : durEn;
+    const hm = (v) => v ? v.slice(11, 16) : "—";
+    const loop = O.age_p99_hours;
+    const lines = [];
+
+    // Parse time
+    if (d.parse_seconds != null) {
+      const r = d.parse_rank_pct;
+      let rank = "";
+      if (!d.removed && r != null) {
+        rank = r >= 90 ? t("in the slowest 10%", "อยู่ในกลุ่ม 10% ที่ช้าที่สุด")
+          : r <= 50 ? t("faster than half of all DAGs", "เร็วกว่าครึ่งหนึ่งของ DAG ทั้งหมด")
+          : t(`slower than ${num(r, 0)}% of DAGs`, `ช้ากว่า ${num(r, 0)}% ของ DAG ทั้งหมด`);
+      }
+      let limit = "";
+      if (d.over_timeout) limit = t(` · over the ${LIMIT_EN} timeout`, ` · เกิน timeout ${LIMIT_TH}`);
+      else if (!d.removed && d.parse_seconds >= R.timeout_limit * 0.8) limit = t(` · close to the ${LIMIT_EN} timeout`, ` · ใกล้ timeout ${LIMIT_TH}`);
+      const stale = d.removed ? t(" (old value, from before the file was removed)", " (ค่าเก่าก่อนไฟล์ถูกลบ)") : "";
+      lines.push([t("Parse time", "เวลา parse"), `<b>${secs(d.parse_seconds)}</b>${rank ? ` — ${rank}` : ""}${limit}${stale}`]);
+    } else {
+      lines.push([t("Parse time", "เวลา parse"), t("no parse time recorded", "ไม่มีเวลา parse")]);
+    }
+
+    // Queue position
+    if (d.removed) {
+      lines.push([t("Parsing", "การ parse"), t("no longer parsed: its file is gone from the bundle", "ไม่ถูก parse แล้ว เพราะไฟล์ไม่อยู่ใน bundle")]);
+    } else if (d.age_hours != null) {
+      const ago = t(`${dur(d.age_hours * 3600)} before the export`, `${dur(d.age_hours * 3600)} ก่อน export`);
+      let state;
+      if (d.overdue) state = t(`much longer than the normal loop (${dur(loop * 3600)}). Check Import Errors`, `นานกว่ารอบปกติ (${dur(loop * 3600)}) มาก ควรตรวจ Import Errors`);
+      else if (d.age_hours <= loop) state = t("within the normal loop", "อยู่ในรอบปกติ");
+      else state = t(`a bit longer than the normal loop (${dur(loop * 3600)})`, `นานกว่ารอบปกติ (${dur(loop * 3600)}) เล็กน้อย`);
+      lines.push([t("Last parsed", "parse ล่าสุด"), `${esc(d.last_parsed)} (${ago})<br>${state}`]);
+      if (d.next_parse_by) {
+        const left = (loop - d.age_hours) * 3600;
+        const when = left > 60
+          ? t(`${dur(left)} after the export`, `${dur(left)} หลัง export`)
+          : t("due now: already at the end of the usual loop", "ถึงคิวแล้ว: ครบรอบปกติแล้ว");
+        lines.push([t("Next parse", "parse ถัดไป"), t(`by about <b>${esc(d.next_parse_by.slice(0, 16))}</b> (${when}) *`, `ไม่เกินประมาณ <b>${esc(d.next_parse_by.slice(0, 16))}</b> (${when}) *`)]);
+      }
+    }
+
+    // Changes
+    if (d.last_changed) {
+      const change = d.removed ? ""
+        : d.changed_at_last_parse
+        ? t("saved by the latest parse: the DAG just changed", "เกิดจากการ parse ครั้งล่าสุด: DAG เพิ่งเปลี่ยน")
+        : t(`${dur((d.hours_since_change ?? 0) * 3600)} before the export; later parses found no change`,
+          `${dur((d.hours_since_change ?? 0) * 3600)} ก่อน export และการ parse หลังจากนั้นไม่พบการเปลี่ยนแปลง`);
+      lines.push([t("Last changed", "เปลี่ยนล่าสุด"), esc(d.last_changed) + (change ? `<br>${change}` : "")]);
+    }
+    lines.push([t("Versions", "จำนวน version"), t(`${int(d.versions)} total · ${int(d.versions_7d)} new in 7 days`, `ทั้งหมด ${int(d.versions)} · ใหม่ ${int(d.versions_7d)} ใน 7 วัน`)]);
+
+    // What to do / how to read
+    const notes = [];
+    if (d.next_parse_by) {
+      notes.push(t(
+        `* Estimate, not a schedule: last parse ${hm(d.last_parsed)} + observed loop ${dur(loop * 3600)} (99% of active DAGs were re-parsed within this time) ≈ ${hm(d.next_parse_by)}. It can be earlier (recently modified files may be parsed first) or later if the processor is busier.`,
+        `* ค่าประมาณ ไม่ใช่ตารางเวลาจริง: parse ล่าสุด ${hm(d.last_parsed)} + รอบการ parse ที่วัดได้ ${dur(loop * 3600)} (99% ของ DAG ที่ active ถูก parse ใหม่ภายในเวลานี้) ≈ ${hm(d.next_parse_by)} อาจเร็วกว่านี้ (ไฟล์ที่เพิ่งแก้อาจได้ parse ก่อน) หรือช้ากว่านี้ถ้า processor ทำงานหนักขึ้น`));
+    }
+    if (d.removed) notes.push(t("Cleanup candidate: delete it from the UI or with airflow dags delete.", "ควรลบ DAG นี้ออก ผ่าน UI หรือ airflow dags delete"));
+    if (d.suspect) notes.push(t(`${int(d.versions_7d)} new versions in 7 days (${int(d.weekend_versions_7d)} on weekends). Probably non-deterministic: check the top-level code.`,
+      `มี version ใหม่ ${int(d.versions_7d)} ครั้งใน 7 วัน (วันหยุด ${int(d.weekend_versions_7d)}) น่าจะ non-deterministic ควรตรวจโค้ดระดับบนสุด`));
+    if (!d.removed && d.last_parsed) {
+      notes.push(t(`Deployed <b>before</b> ${hm(d.last_parsed)}: already parsed. If Last changed didn't move, the change didn't alter the DAG structure.`,
+        `deploy <b>ก่อน</b> ${hm(d.last_parsed)}: ถูก parse แล้ว ถ้า "เปลี่ยนล่าสุด" ไม่ขยับ แปลว่าการแก้ไม่ได้เปลี่ยนโครงสร้าง DAG`));
+      notes.push(t(`Deployed <b>after</b> ${hm(d.last_parsed)}: not visible yet; it waits for the next parse.`,
+        `deploy <b>หลัง</b> ${hm(d.last_parsed)}: ยังไม่ขึ้น UI ต้องรอ parse รอบถัดไป`));
+    }
+
+    return `<div class="tip-id">${esc(d.dag_id)}</div>` +
+      `<div class="tip-sub">${esc(d.application)} · ${esc(d.environment)} · ${esc(d.fileloc)}</div>` +
+      (flags(d) ? `<div class="tip-badges">${flags(d)}</div>` : "") +
+      `<dl>${lines.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>` +
+      (notes.length ? `<div class="tip-note">${t("Notes", "หมายเหตุ")}<ul>${notes.map((n) => `<li>${n}</li>`).join("")}</ul></div>` : "");
+  }
+
+  const tip = $("row-tip");
+  function placeTip(e) {
+    const pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
+    let x = e.clientX + pad, y = e.clientY + pad;
+    if (x + w > window.innerWidth - 8) x = Math.max(8, e.clientX - w - pad);
+    if (y + h > window.innerHeight - 8) y = Math.max(8, window.innerHeight - h - 8);
+    tip.style.left = `${x}px`;
+    tip.style.top = `${y}px`;
+  }
+  $("dag-table").addEventListener("mouseover", (e) => {
+    const tr = e.target.closest("tbody tr[data-i]");
+    if (!tr) return;
+    tip.innerHTML = rowSummary(dags[Number(tr.dataset.i)]);
+    tip.lang = lang === "en" ? "en" : "th";
+    tip.hidden = false;
+    placeTip(e);
+  });
+  $("dag-table").addEventListener("mousemove", (e) => { if (!tip.hidden) placeTip(e); });
+  $("dag-table").addEventListener("mouseleave", () => { tip.hidden = true; });
+  window.addEventListener("scroll", () => { tip.hidden = true; }, { passive: true });
+
+  // ---------- full table ----------
+  const PAGE = 100;
+  const state = { sort: "parse_seconds", dir: -1, limit: PAGE };
+  const columns = [
+    { key: "dag_id", label: "DAG id", cls: "id" },
+    { key: "application", label: "Application" },
+    { key: "environment", label: "Env" },
+    { key: "parse_seconds", label: "Parse (s)", term: "parse", num: true, fmt: (v) => v == null ? "—" : num(v, 2) },
+    { key: "versions", label: "Versions (total)", term: "versions", num: true, fmt: int },
+    ...(R.has_version_history ? [{ key: "versions_7d", label: "New 7d", term: "suspect", num: true, fmt: int }] : []),
+    { key: "last_parsed", label: "Last parsed", term: "age", time: true },
+    ...(dags.some((d) => d.last_changed) ? [{ key: "last_changed", label: "Last changed", term: "changed", time: true }] : []),
+    { key: "age_hours", label: "Age (h)", term: "age", num: true, fmt: (v) => v == null ? "—" : num(v, 1) },
+  ];
+
+  function options(el, label, values) {
+    el.innerHTML = `<option value="">${label}</option>` + values.map((v) => `<option>${esc(v)}</option>`).join("");
+  }
+  options($("f-app"), "All applications", [...new Set(dags.map((d) => d.application))].sort());
+  options($("f-env"), "All environments", [...new Set(dags.map((d) => d.environment))].sort());
+
+  function filtered() {
+    const q = $("f-search").value.trim().toLowerCase();
+    const app = $("f-app").value, env = $("f-env").value, flag = $("f-flag").value;
+    const rows = dags.filter((d) =>
+      (!q || d.dag_id.toLowerCase().includes(q) || d.fileloc.toLowerCase().includes(q)) &&
+      (!app || d.application === app) && (!env || d.environment === env) &&
+      (!flag || (flag === "timeout" && d.over_timeout) || (flag === "missing" && !d.removed && d.parse_seconds == null) ||
+        (flag === "active" && !d.removed) || (flag === "overdue" && d.overdue) || (flag === "removed" && d.removed) || (flag === "suspect" && d.suspect) ||
+        (flag === "changed" && !d.removed && d.changed_at_last_parse) || (flag === "unchanged" && parseResult(d) === "same") || (flag === "churn" && d.versions > 1)));
+    const k = state.sort, dir = state.dir;
+    return rows.sort((a, b) => {
+      const x = a[k], y = b[k];
+      if (x == null && y == null) return 0;
+      if (x == null) return 1;
+      if (y == null) return -1;
+      return (typeof x === "string" ? x.localeCompare(y) : x - y) * dir;
+    });
+  }
+
+  function flags(d) {
+    const badge = (cls, text, key) => `<span class="badge ${cls}" title="${esc(shortText(key))}">${text}</span>`;
+    return (d.over_timeout ? badge("critical", "over timeout", "timeout") : "") +
+      (d.parse_seconds == null ? badge("muted", "no parse time", "missing") : "") +
+      (d.overdue ? badge("warning", "overdue", "overdue") : "") +
+      (d.removed ? badge("muted", "removed", "removed") : "") +
+      (d.suspect ? badge("warning", "non-deterministic?", "suspect") : "");
+  }
+
+  dags.forEach((d, i) => { d.__i = i; });
+
+  // Outcome of the DAG's latest parse, as far as the version history can tell.
+  const parseResult = (d) => d.removed ? "removed"
+    : !d.last_changed || !d.last_parsed ? null
+    : d.changed_at_last_parse ? "changed" : "same";
+
+  function renderLegend() {
+    if (!R.has_version_history && !dags.some((d) => d.last_changed)) { $("table-legend").hidden = true; return; }
+    const item = (cls, en, th, n) => `<span><span class="dot ${cls}"></span>${lang === "th" ? th : en}${n != null ? ` (${int(n)})` : ""}` +
+      (lang === "both" ? ` <span class="note-th" lang="th" style="display:inline">· ${th}</span>` : "") + `</span>`;
+    $("table-legend").innerHTML =
+      item("dot-changed", "New version at latest parse", "parse ล่าสุดมี version ใหม่", S.changed_at_last_parse_count) +
+      item("dot-same", "Parsed, no new version", "parse แล้วแต่ไม่มี version ใหม่", S.unchanged_at_last_parse_count) +
+      (R.has_removed_flag ? item("dot-removed", "Removed (dimmed)", "ถูกลบแล้ว (แถวจาง)", null) : "") +
+      `<a href="#term-changed">${lang === "th" ? "อ่านอย่างไร?" : "How to read this?"}</a>`;
+  }
+
+  // "2026-09-23 16:59:45" → "09-23 16:59"; the full value stays in the cell's tooltip.
+  const shortTime = (v) => v ? v.slice(5, 16) : "—";
+
+  function renderTable() {
+    const rows = filtered();
+    const head = `<thead><tr>${columns.map((c) =>
+      `<th class="sortable ${c.num ? "num" : ""}" data-key="${c.key}" ${state.sort === c.key ? `aria-sort="${state.dir > 0 ? "ascending" : "descending"}"` : ""}${c.term ? ` title="${esc(shortText(c.term))}"` : ""}>${c.label}</th>`).join("")}<th>Flags</th></tr></thead>`;
+    const body = rows.slice(0, state.limit).map((d) => {
+      const result = parseResult(d);
+      const rowClass = result === "changed" ? "row-changed" : result === "removed" ? "row-removed" : "";
+      const dot = result === "changed" ? "dot-changed" : result === "same" ? "dot-same" : result === "removed" ? "dot-removed" : "";
+      return `<tr data-i="${d.__i}" class="${rowClass}">${columns.map((c) => {
+      const v = d[c.key];
+      let text = c.fmt ? c.fmt(v) : c.time ? esc(shortTime(v)) : esc(v ?? "—");
+      if (c.key === "last_changed" && dot && v) text = `<span class="dot ${dot}"></span>${text}`;
+      const title = null; // the row tooltip shows the file path and full timestamps
+      return `<td class="${c.num ? "num" : ""} ${c.cls ?? ""}"${title ? ` title="${esc(title)}"` : ""}>${text}</td>`;
+    }).join("")}<td>${flags(d)}</td></tr>`;
+    }).join("");
+    $("dag-table").innerHTML = head + `<tbody>${body}</tbody>`;
+    $("table-count").textContent = `Showing ${int(Math.min(state.limit, rows.length))} of ${int(rows.length)} DAGs`;
+    $("more").hidden = rows.length <= state.limit;
+  }
+
+  $("dag-table").addEventListener("click", (e) => {
+    const th = e.target.closest("th[data-key]");
+    if (!th) return;
+    const key = th.dataset.key;
+    state.dir = state.sort === key ? -state.dir : (columns.find((c) => c.key === key).num ? -1 : 1);
+    state.sort = key;
+    renderTable();
+  });
+  ["f-search", "f-app", "f-env", "f-flag"].forEach((id) =>
+    $(id).addEventListener("input", () => { state.limit = PAGE; renderTable(); }));
+  $("more").addEventListener("click", () => { state.limit += PAGE * 5; renderTable(); });
+
+  $("export").addEventListener("click", () => {
+    const cols = ["dag_id", "fileloc", "application", "environment", "parse_seconds", "versions", "last_parsed", "last_changed", "age_hours", "over_timeout", "overdue", "removed", "versions_24h", "versions_7d", "weekend_versions_7d", "changed_at_last_parse", "suspect"];
+    const cell = (v) => v == null ? "" : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v);
+    const csv = [cols.join(","), ...filtered().map((d) => cols.map((c) => cell(d[c])).join(","))].join("\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    a.download = "dags.csv";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+
+  // ---------- theme ----------
+  const THEMES = ["auto", "light", "dark"];
+  let themeIndex = 0;
+  try { themeIndex = Math.max(0, THEMES.indexOf(localStorage.getItem("report-theme") ?? "auto")); } catch (_) {}
+  function applyTheme() {
+    const mode = THEMES[themeIndex];
+    if (mode === "auto") document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.setAttribute("data-theme", mode);
+    $("theme-toggle").textContent = `Theme: ${mode}`;
+    try { localStorage.setItem("report-theme", mode); } catch (_) {}
+    renderCharts();
+  }
+  $("theme-toggle").addEventListener("click", () => { themeIndex = (themeIndex + 1) % THEMES.length; applyTheme(); });
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (THEMES[themeIndex] === "auto") renderCharts(); });
+
+  let resizeTimer;
+  let wasNarrow = narrow();
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (narrow() !== wasNarrow) { wasNarrow = narrow(); renderCharts(); } else charts.forEach((c) => c.resize());
+    }, 150);
+  });
+
+  $("lang-switch").addEventListener("click", (e) => {
+    const button = e.target.closest("button[data-lang]");
+    if (!button) return;
+    lang = button.dataset.lang;
+    try { localStorage.setItem("report-lang", lang); } catch (_) {}
+    applyLang();
+    renderCharts();
+  });
+
+  function applyLang() {
+    document.documentElement.dataset.lang = lang;
+    renderGlossary();
+    renderSectionNotes();
+    renderTiles();
+    renderLegend();
+    renderTable();
+    if (openBin) showBin(openBin);
+    if (dialogApp) { renderAppDialog(); renderDialogChart(); }
+  }
+
+  applyLang();
+  applyTheme();
+})();
+</script>
+</body>
+</html>
