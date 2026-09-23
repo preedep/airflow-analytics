@@ -28,7 +28,155 @@
 - **คงชื่อ `dags-folder` ไว้:** DAG ส่วนใหญ่จะไม่ต้องย้าย bundle มีแค่ APP-HEAVY (426) กับ APP-PILOT (30) ที่ย้าย
 - **APP-PILOT ใช้เป็นกลุ่มทดลอง:** median parse 88 วินาที มี 30 DAG เล็กพอจะเห็นผลชัดว่าเวลารอเกิดจากคิวรวมหรือจาก app เอง
 
+## วิธีใช้คู่มือนี้
+
+| ส่วน | เป้าหมาย | วิธี | ขอบเขต |
+|---|---|---|---|
+| **A: ทดสอบ bundle แบบ ad-hoc** | ยืนยันว่าการแยก bundle ทำให้รอบการ parse สั้นลงจริง | `kubectl` (ไม่ใช้ Helm) ย้อนกลับได้ด้วยคำสั่งไม่กี่บรรทัด | **APP-PILOT อย่างเดียว** บน **dev** |
+| **B: ทำจริง** | แยก bundle แบบถาวร | Helm values + deployment ใน repo | APP-HEAVY และ APP-PILOT |
+
+ทำ **ส่วน A ก่อน** ถ้าผลไม่ชัด ยังไม่ต้องทำส่วน B
+
 ---
+
+# ส่วน A: ทดสอบ bundle แบบ ad-hoc (kubectl, เฉพาะ APP-PILOT)
+
+**แนวคิด:** ให้ APP-PILOT มี bundle `pilot` และ dag-processor ของตัวเอง แล้วดูว่า DAG ของ APP-PILOT ถูก parse ถี่ขึ้นจริงหรือไม่ ทุกอย่างทำด้วย `kubectl` บน dev และย้อนกลับได้
+
+> ⚠ **ก่อนเริ่ม**
+> - ทำบน **dev** เท่านั้น และแจ้งทีมที่ใช้ dev ขั้นตอนที่ A2 ทำให้ pod ของ Airflow restart
+> - ถ้า Airflow ถูกจัดการด้วย GitOps (Argo CD, Flux) ให้ **pause การ sync** ก่อน ไม่อย่างนั้นการแก้ด้วย `kubectl` จะถูกเขียนทับ
+> - `helm upgrade` ครั้งถัดไปจะเขียนทับ args ของ dag-processor แต่**จะไม่ลบ** env ที่เพิ่มด้วย `kubectl set env` ให้ทำ rollback (A7) ให้ครบก่อน `helm upgrade`
+> - ชื่อ label (`component=...`) ชื่อ deployment และ container อ้างจาก chart ทางการ ให้ตรวจในขั้นตอน A0
+
+## A0. ตรวจก่อนเริ่ม (อ่านอย่างเดียว)
+
+```sh
+NS=airflow
+kubectl -n $NS exec deploy/airflow-dag-processor -- airflow dag-processor --help | grep -i bundle   # ต้องมี --bundle-name
+kubectl -n $NS get deploy,sts -l 'component in (scheduler,api-server,triggerer,worker,dag-processor)'
+kubectl -n $NS get deploy airflow-dag-processor \
+  -o jsonpath='{range .spec.template.spec.containers[*]}{.name}{"\n"}{end}'                     # container แรกต้องเป็น dag-processor
+
+# (แนะนำ) 2 pods ตอนนี้ parse ไฟล์ซ้ำกันหรือไม่: ถ้าไฟล์เดียวกันขึ้นใน log ทั้ง 2 pods แปลว่าซ้ำ
+FILE=<ชื่อไฟล์ DAG ใน APP-PILOT>
+for p in $(kubectl -n $NS get pods -l component=dag-processor -o name); do
+  echo "== $p"; kubectl -n $NS logs "$p" --since=3h | grep -F "$FILE" | tail -3
+done
+```
+
+**วัดค่าก่อนทดสอบ (baseline):** DAG ของ APP-PILOT ถูก parse ครั้งล่าสุดนานสุดกี่นาทีแล้ว
+
+```sql
+SELECT count(*) AS dags,
+       round(extract(epoch FROM now() - min(last_parsed_time)) / 60) AS oldest_parse_min
+FROM dag
+WHERE NOT is_stale AND fileloc LIKE '%/<org>/APP-PILOT/%';
+```
+
+## A1. เตรียมตัวแปร และสำรองค่าเดิม
+
+```sh
+NS=airflow
+BUNDLES='[{"name":"dags-folder","classpath":"airflow.dag_processing.bundles.local.LocalDagBundle","kwargs":{"path":"/opt/airflow/dags"}},{"name":"pilot","classpath":"airflow.dag_processing.bundles.local.LocalDagBundle","kwargs":{"path":"/opt/airflow/dags/<org>/APP-PILOT"}}]'
+kubectl -n $NS get deploy airflow-dag-processor \
+  -o jsonpath='{.spec.template.spec.containers[0].args}' > dag-processor-args-original.json
+cat dag-processor-args-original.json
+```
+
+## A2. ใส่ bundle config ให้ทุก component (pod จะ restart)
+
+```sh
+kubectl -n $NS set env deploy,sts -l 'component in (scheduler,api-server,triggerer,worker,dag-processor)' \
+  AIRFLOW__DAG_PROCESSOR__DAG_BUNDLE_CONFIG_LIST="$BUNDLES"
+```
+
+ใช้ label เจาะจงเฉพาะ component ของ Airflow เพื่อไม่ให้ Redis หรือ PgBouncer restart ไปด้วย ต้องใส่ทุก component เพราะ worker ต้องหาไฟล์ของ DAG ใน bundle `pilot` ตอนรัน task
+
+## A3. ให้ dag-processor เดิมดูแลเฉพาะ `dags-folder`
+
+```sh
+kubectl -n $NS patch deploy airflow-dag-processor --type json -p \
+  '[{"op":"replace","path":"/spec/template/spec/containers/0/args",
+     "value":["bash","-c","exec airflow dag-processor --bundle-name dags-folder"]}]'
+```
+
+## A4. สร้าง dag-processor ของ `pilot` (โคลนจาก deployment เดิม)
+
+```sh
+kubectl -n $NS get deploy airflow-dag-processor -o yaml | yq '
+  del(.metadata.uid, .metadata.resourceVersion, .metadata.creationTimestamp,
+      .metadata.generation, .metadata.managedFields, .metadata.annotations, .status) |
+  .metadata.name = "airflow-dag-processor-pilot" |
+  .metadata.labels.component = "dag-processor-pilot" |
+  .spec.replicas = 1 |
+  .spec.selector.matchLabels.component = "dag-processor-pilot" |
+  .spec.template.metadata.labels.component = "dag-processor-pilot" |
+  .spec.template.spec.containers[0].args = ["bash","-c","exec airflow dag-processor --bundle-name pilot"] |
+  .spec.template.spec.containers[0].env += [{"name":"AIRFLOW__DAG_PROCESSOR__PARSING_PROCESSES","value":"4"}]
+' | kubectl -n $NS apply -f -
+
+kubectl -n $NS rollout status deploy/airflow-dag-processor-pilot
+```
+
+การเปลี่ยน label `component` ทำให้ deployment เดิมไม่นับ pod ของ `pilot` เป็นของตัวเอง
+
+## A5. ตัด APP-PILOT ออกจาก `dags-folder` (`.airflowignore`)
+
+เพิ่มบรรทัดนี้ใน `.airflowignore` ที่ root ของ blob (ถ้ามีไฟล์อยู่แล้ว ให้เพิ่ม ไม่ใช่เขียนทับ):
+
+```
+<org>/APP-PILOT/
+```
+
+ทำขั้นนี้**หลัง** A4 เพื่อให้ processor ของ `pilot` เริ่มรับ DAG ไปก่อน ช่วงสั้น ๆ ระหว่าง A4 กับ A5 ที่ทั้งสอง bundle parse ไฟล์เดียวกันอาจทำให้ `bundle_name` ของ DAG สลับไปมา ถือว่ารับได้ในการทดสอบบน dev
+
+## A6. ตรวจและวัดผล (หลัง A5 ประมาณ 10–15 นาที)
+
+```sql
+-- 1) DAG ของ APP-PILOT ต้องย้ายมาอยู่ bundle "pilot" ครบ และไม่เป็น stale
+SELECT bundle_name, is_stale, count(*) FROM dag
+WHERE fileloc LIKE '%/<org>/APP-PILOT/%' GROUP BY 1, 2;
+
+-- 2) รอบการ parse ของแต่ละ bundle: parse ครั้งล่าสุดนานสุดกี่นาทีแล้ว
+SELECT bundle_name, count(*) AS dags,
+       round(extract(epoch FROM now() - min(last_parsed_time)) / 60) AS oldest_parse_min
+FROM dag WHERE NOT is_stale GROUP BY 1 ORDER BY 1;
+```
+
+**ตรวจเพิ่ม:**
+- Import Errors ใน UI ไม่มีรายการใหม่
+- log ของ `airflow-dag-processor-pilot` ไม่มี error: `kubectl -n $NS logs deploy/airflow-dag-processor-pilot --since=15m | grep -i error`
+- trigger DAG ของ APP-PILOT 1 ตัว แล้วดูว่า task รันผ่าน (worker หาไฟล์ใน bundle `pilot` เจอ)
+- ลองแก้ `doc_md` ของ DAG ใน APP-PILOT แล้ว deploy จับเวลาจนมี version ใหม่ใน UI
+
+**อ่านผล**
+
+| ผล | แปลว่า |
+|---|---|
+| `pilot` มี `oldest_parse_min` ไม่กี่นาที (เดิม ~60–90) และ deploy ขึ้นภายในไม่กี่นาที | เวลาที่รอเกิดจาก**คิวรวม** การแยก bundle ได้ผล ไปทำส่วน B |
+| `pilot` ยังนานใกล้เคียงเดิม | คอขวดอยู่ที่อื่น เช่น การ sync จาก blob หรือระบบภายนอกที่ DAG เรียก ให้ตรวจก่อนทำส่วน B |
+| DAG ของ APP-PILOT เป็น stale หรือมี import error | ปัญหา path หรือ import โค้ดร่วม ดูส่วน B ขั้นตอนที่ 1 (`PYTHONPATH`) แล้ว rollback |
+
+## A7. Rollback (ย้อนลำดับ)
+
+```sh
+# 1) ลบบรรทัด <org>/APP-PILOT/ ออกจาก .airflowignore บน blob
+# 2) ลบ dag-processor ของ pilot
+kubectl -n $NS delete deploy airflow-dag-processor-pilot
+# 3) คืน args เดิมของ dag-processor
+kubectl -n $NS patch deploy airflow-dag-processor --type json -p \
+  "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args\",\"value\":$(cat dag-processor-args-original.json)}]"
+# 4) ลบ bundle config ออกจากทุก component (pod จะ restart)
+kubectl -n $NS set env deploy,sts -l 'component in (scheduler,api-server,triggerer,worker,dag-processor)' \
+  AIRFLOW__DAG_PROCESSOR__DAG_BUNDLE_CONFIG_LIST-
+```
+
+ตรวจหลัง rollback: DAG ของ APP-PILOT กลับมาอยู่ `dags-folder` และไม่เป็น stale (ใช้ SQL ข้อ 1 ใน A6) แล้วค่อยเปิด GitOps sync กลับ
+
+---
+
+# ส่วน B: ทำจริง (Helm)
 
 ## ขั้นตอนที่ 0: ตรวจเวอร์ชันและ CLI
 
@@ -236,7 +384,8 @@ helm upgrade airflow apache-airflow/airflow -n airflow --version <chart-version>
 
 | ระดับ | สิ่งที่ทำ | กระทบระบบ? |
 |---|---|---|
-| 1 | ขั้นตอนที่ 0–1 ใน pod เดิม | ไม่กระทบ |
+| 1 | ส่วน A ขั้นตอน A0 และส่วน B ขั้นตอนที่ 0–1 ใน pod เดิม | ไม่กระทบ |
+| 1.5 | ส่วน A (A1–A7) ทดสอบ bundle จริงเฉพาะ APP-PILOT บน dev | pod ของ dev restart 2 ครั้ง (A2, A7) |
 | 2 | `helm template`, `helm diff upgrade`, `helm upgrade --dry-run` | ไม่กระทบ |
 | 3 | sandbox บน k3s ที่ เครื่องส่วนตัว (Airflow 3.2.1): สร้าง `<org>/APP-HEAVY` และ `<org>/APP-PILOT` พร้อม DAG ตัวอย่าง 2–3 ไฟล์ แล้วทำขั้นตอน 2–6 ทั้งหมด | ไม่กระทบเครื่องของทีม |
 | 4 | ทำทั้ง flow บน **dev** ก่อน แล้วค่อย **sit** | กระทบเฉพาะ env นั้น |
