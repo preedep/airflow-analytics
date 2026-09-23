@@ -2,7 +2,7 @@
 /report
 /dataset
 .DS_Store
-claude.md
 upload-report.sh
 .env.local
 .env
+CLAUDE.md
