@@ -1,195 +1,76 @@
-# คู่มือ: แยก DAG bundle ให้ APxxxx-YYYYY และ APzzzz-WWWWW (Airflow 3 + Helm)
+# คู่มือ: ให้ APzzzz-WWWWW มี dag-processor ของตัวเอง (bundle `pilot`, Airflow 3 + Helm)
 
-> **ชื่อในคู่มือนี้เป็นตัวแทน (placeholder)** ให้แทนด้วยค่าจริงของระบบ โครงสร้าง path ของไฟล์ DAG เป็นแบบนี้:
->
-> ```
-> /opt/airflow/dags/<company_name>/APxxxx-YYYYY/dev_<company_name>_apxxxx_yyyyy_workflow_group2_corp.py
->                   └ ชื่อบริษัท      └ รหัส-ชื่อ app   └ env_บริษัท_รหัส_ชื่อ app_ชื่องาน
-> ```
+> **ชื่อในคู่มือนี้เป็นตัวแทน (placeholder)** ให้แทนด้วยค่าจริง
 >
 > | placeholder | ความหมาย |
 > |---|---|
 > | `<company_name>` | folder ชื่อบริษัทใต้ `/opt/airflow/dags` |
-> | `APxxxx-YYYYY` | app ที่ใช้เวลา parse มาก (แยกเป็น bundle `heavy`) |
-> | `APzzzz-WWWWW` | app ที่ใช้ทดลอง (แยกเป็น bundle `pilot`) |
+> | `APzzzz-WWWWW` | app ที่จะแยกออกมา (bundle `pilot`) |
+> | `<chart-version>` | เวอร์ชันของ chart `apache-airflow/airflow` ที่ใช้อยู่ |
 >
-> ชื่อ bundle (`heavy`, `pilot`) ตั้งเป็นอะไรก็ได้ เช่นใช้รหัส app ตัวพิมพ์เล็ก ตัวเลข (จำนวน DAG, เวลา parse) มาจาก export ตัวอย่าง
+> path ของไฟล์ DAG: `/opt/airflow/dags/<company_name>/APzzzz-WWWWW/<env>_<company_name>_apzzzz_<งาน>.py`
 
-เป้าหมาย: ให้ app ที่ใช้เวลา parse มาก (APxxxx-YYYYY) และ app ที่ใช้เป็นกลุ่มทดลอง (APzzzz-WWWWW) มี dag-processor ของตัวเอง จะได้**ไม่ต้องรอคิว parse รวมกับ app อื่น**
+## เป้าหมาย
 
-ตัวเลขที่ใช้วางแผนมาจากรายงาน `report/dag_processor_report.html` (export วันที่ 2026-09-23 18:14 เฉพาะ DAG ที่ active)
+- DAG ของ **APzzzz-WWWWW** ถูก parse โดย **dag-processor ของตัวเอง** ไม่ต้องรอคิวรวมกับ app อื่น
+- dag-processor **default** (2 replicas) ยังทำงานต่อตามเดิม ดูแลทุก app ยกเว้น APzzzz-WWWWW
+- ทุกอย่าง deploy ด้วย **`helm upgrade`** ครั้งเดียว ย้อนกลับได้
 
-> ⚠ **สมมติฐานที่ต้องตรวจก่อนทำ**
-> - ติดตั้งด้วย chart ทางการ `apache-airflow/airflow`
-> - DAG ถูก mount จาก blob storage มาที่ `/opt/airflow/dags`
-> - ชื่อ key และ path ของ template ใน chart, flag `airflow dag-processor --bundle-name`, รูปแบบ `dag_bundle_config_list` และพฤติกรรมตอนย้าย DAG ข้าม bundle อ้างอิงจากความรู้เรื่อง Airflow 3 **ยังไม่ได้ทดสอบกับเวอร์ชันที่ใช้จริง**
->
-> ขั้นตอนที่ 0 และ 1 มีไว้ตรวจเรื่องเหล่านี้ ถ้าผลไม่ตรงกับคู่มือ ให้หยุดก่อน
+```
+ตอนนี้                                      หลังทำ
+┌──────────────────────────────┐          ┌──────────────────────────────────────────┐
+│ dag-processor (2 replicas)   │          │ dag-processor (2 replicas, เดิม)          │
+│ ทุก app อยู่คิวเดียว              │   ──►    │  --bundle-name dags-folder   ทุก app อื่น  │
+│ รอบละ ~75–92 นาที              │          ├──────────────────────────────────────────┤
+└──────────────────────────────┘          │ dag-processor-pilot (1 replica, ใหม่)     │
+                                          │  --bundle-name pilot   APzzzz-WWWWW      │
+                                          │  4 processes, รอบละ ~9 นาที               │
+                                          └──────────────────────────────────────────┘
+```
+
+| | DAG (active) | เวลา parse รวม | รอบที่คาดไว้ |
+|---|---|---|---|
+| `pilot` (APzzzz-WWWWW) | 30 | 0.60 ชม. (median 88 วินาที/ไฟล์) | ~9 นาที (4 processes) |
+| `dags-folder` (default) | ~1,500 | ~20.9 ชม. | เท่าเดิม ~75–90 นาที |
+
+ตัวเลขมาจาก export วันที่ 2026-09-23 18:14 การแยก `pilot` ออกมาไม่ได้ทำให้ default เร็วขึ้น เพราะ `pilot` มีเวลา parse แค่ 3% ของทั้งหมด งานนี้มีไว้**พิสูจน์ว่าเวลาที่รอเกิดจากคิวรวม** ถ้าได้ผลค่อยแยก app ที่หนักตามไป
+
+## ทำไมตั้งชื่อ bundle อย่างเดียวไม่พอ
+
+bundle เป็นแค่การแบ่งกลุ่ม ถ้า dag-processor ไม่ได้ระบุ `--bundle-name` มันจะ parse **ทุก bundle** ในคิวเดียวกัน รอบจึงยาวเท่าเดิม ต้องมีครบ 4 อย่างนี้:
+
+| # | สิ่งที่ต้องมี | ทำในขั้นตอน | ถ้าขาด |
+|---|---|---|---|
+| 1 | `dag_bundle_config_list` มี bundle `pilot` และตั้งให้**ทุก component** | 2 | worker หาไฟล์ของ DAG ใน `pilot` ไม่เจอตอนรัน task |
+| 2 | processor default รัน `--bundle-name dags-folder` | 2 | default ยัง parse `pilot` ด้วย ไม่ได้แยกจริง |
+| 3 | deployment แยกรัน `--bundle-name pilot` | 3 | ไม่มี processor ของ `pilot` โดยเฉพาะ |
+| 4 | `.airflowignore` ที่ root ตัด folder ของ app ออกจาก `dags-folder` | 5 | ไฟล์ถูก parse 2 ครั้ง และ `bundle_name` ของ DAG สลับไปมา |
 
 ---
 
-## ภาพรวม
-
-| bundle | path | dag-processor | parsing_processes | DAG (active) | เวลา parse รวม | รอบที่คาดไว้* |
-|---|---|---|---|---|---|---|
-| `dags-folder` (เดิม) | `/opt/airflow/dags` (ยกเว้น APxxxx-YYYYY, APzzzz-WWWWW) | deployment เดิมของ chart | 16 | ~1,070 | ~12.5 ชม. | ~47 นาที |
-| `heavy` | `/opt/airflow/dags/<company_name>/APxxxx-YYYYY` | deployment ใหม่ | 16 | 426 | 8.45 ชม. | ~32 นาที |
-| `pilot` | `/opt/airflow/dags/<company_name>/APzzzz-WWWWW` | deployment ใหม่ | 4 | 30 | 0.60 ชม. | ~9 นาที |
-
-\* รอบที่คาดไว้ = เวลา parse รวม ÷ parsing_processes สมมติว่าแต่ละ process ไม่ได้แย่งระบบภายนอกตัวเดียวกัน ตอนนี้รอบที่วัดได้อยู่ที่ประมาณ 75–92 นาที ซึ่งเท่ากับที่ใช้ 16 processes ไม่ใช่ 32 (ดูหัวข้อ "dag-processor 2 replicas")
-
-- **คงชื่อ `dags-folder` ไว้:** DAG ส่วนใหญ่จะไม่ต้องย้าย bundle มีแค่ APxxxx-YYYYY (426) กับ APzzzz-WWWWW (30) ที่ย้าย
-- **APzzzz-WWWWW ใช้เป็นกลุ่มทดลอง:** median parse 88 วินาที มี 30 DAG เล็กพอจะเห็นผลชัดว่าเวลารอเกิดจากคิวรวมหรือจาก app เอง
-
-## ตั้ง bundle อย่างเดียวไม่ทำให้เร็วขึ้น: ต้องมี dag-processor เฉพาะ bundle
-
-bundle เป็นแค่**การแบ่งกลุ่มเชิงตรรกะ** ถ้า dag-processor ไม่ได้ระบุ `--bundle-name` มันจะ parse **ทุก bundle** ต่อกันในรอบเดียว ด้วย `parsing_processes` ชุดเดิม รอบจึงยังยาวเท่าเดิม (≈ เวลา parse รวม ÷ processes) สิ่งที่เปลี่ยนมีแค่ค่า `bundle_name` ของ DAG
-
-ความเร็วมาจากการให้ bundle มี **dag-processor (pod) ของตัวเอง** DAG ของ bundle นั้นจะไม่ต้องรอคิวรวมกับ app อื่น
-
-```
-ก่อน (หรือตั้ง bundle แต่ไม่ได้แยก processor)      หลัง (แยก processor)
-┌─────────────────────────────┐                 ┌───────────────────────────────────────┐
-│ airflow dag-processor       │                 │ airflow dag-processor                 │
-│  → dags-folder + pilot      │                 │   --bundle-name dags-folder  (16 proc)│
-│  (คิวเดียว ~75–90 นาที)       │                 ├───────────────────────────────────────┤
-└─────────────────────────────┘                 │ airflow dag-processor                 │
-                                                │   --bundle-name pilot         (4 proc)│
-                                                │  (คิวของ pilot เอง ~9 นาที)             │
-                                                └───────────────────────────────────────┘
-```
-
-ต้องมี**ครบทั้ง 4 ข้อ**:
-
-| # | สิ่งที่ต้องมี | ขั้นตอน | ถ้าขาด |
-|---|---|---|---|
-| 1 | `dag_bundle_config_list` ค่าเดียวกันใน**ทุก component** (scheduler, api-server, worker, triggerer, dag-processor) | A2 / B2 | worker หาไฟล์ของ DAG ใน `pilot` ไม่เจอตอนรัน task |
-| 2 | dag-processor เดิมรัน `airflow dag-processor --bundle-name dags-folder` | A3 / B2 | processor เดิมยัง parse `pilot` ด้วย ไม่ได้แยกจริง |
-| 3 | deployment **แยก** รัน `airflow dag-processor --bundle-name pilot` พร้อม `PARSING_PROCESSES` ของตัวเอง | A4 / B3 | ไม่มีใคร parse `pilot` โดยเฉพาะ |
-| 4 | `.airflowignore` ตัด `<company_name>/APzzzz-WWWWW/` ออกจาก `dags-folder` | A5 / B4 | ไฟล์ถูก parse **2 รอบ** (`dags-folder` เริ่มที่ `/opt/airflow/dags` จึงเห็น folder ย่อยด้วย) ช้าลง และ `bundle_name` สลับไปมา |
-
-**ตรวจว่าตอนนี้ครบหรือยัง** (ใช้ได้ทั้งก่อนเริ่มและหลังตั้ง bundle ไปแล้ว):
+## ขั้นตอนที่ 0: ตรวจก่อนเริ่ม (ไม่เปลี่ยนแปลงอะไรในระบบ)
 
 ```sh
 NS=airflow
-# ข้อ 2, 3: แต่ละ processor ผูกกับ bundle ไหน (ต้องเห็น --bundle-name ทุกตัว)
-kubectl -n $NS get deploy -l 'component in (dag-processor,dag-processor-pilot)' \
-  -o custom-columns='NAME:.metadata.name,REPLICAS:.spec.replicas,ARGS:.spec.template.spec.containers[0].args'
+RELEASE=airflow
 
-# ข้อ 1: ทุก component เห็น bundle config เดียวกัน
-for c in scheduler api-server triggerer worker dag-processor; do
-  pod=$(kubectl -n $NS get pods -l component=$c -o name | head -1)
-  [ -n "$pod" ] && echo "== $c" && kubectl -n $NS exec "$pod" -- \
-    airflow config get-value dag_processor dag_bundle_config_list
-done
+helm version --short                                   # ต้องเป็น Helm 3.x (ดูหมายเหตุขั้นตอนที่ 3)
+helm -n $NS list                                       # ดูเวอร์ชันของ chart → ใช้เป็น <chart-version>
+helm -n $NS get values $RELEASE -o yaml > values-current.yaml   # สำรอง values ปัจจุบัน
+which yq && yq --version                               # ต้องเป็น mikefarah/yq v4
 
-# ข้อ 4: ไฟล์ ignore ที่ root และทุกไฟล์ใน folder ย่อย (ดูหัวข้อ "แต่ละ bundle อ่าน .airflowignore ไหน")
-kubectl -n $NS exec deploy/airflow-dag-processor -- cat /opt/airflow/dags/.airflowignore
-kubectl -n $NS exec deploy/airflow-dag-processor -- find /opt/airflow/dags -name .airflowignore
-```
-
-```sql
--- DAG ของ APzzzz-WWWWW ต้องอยู่ pilot ทั้งหมด ถ้ายังมีแถว dags-folder แปลว่าข้อ 2 หรือ 4 ขาด
-SELECT bundle_name, is_stale, count(*) FROM dag
-WHERE fileloc LIKE '%/<company_name>/APzzzz-WWWWW/%' GROUP BY 1, 2;
-```
-
-| อาการ | สาเหตุที่น่าจะเป็น |
-|---|---|
-| ตั้ง bundle แล้ว แต่ `oldest_parse_min` ของ `pilot` ยัง ~75–90 นาที | ไม่มี processor เฉพาะ `pilot` (ข้อ 2 หรือ 3 ขาด) |
-| `bundle_name` ของ DAG เดียวกันสลับระหว่าง `dags-folder` กับ `pilot` | `.airflowignore` ยังไม่ตัด folder (ข้อ 4) |
-| DAG ของ `pilot` เป็น stale ทั้งที่ไฟล์ยังอยู่ | ไม่มี processor ไหน parse `pilot` หรือ path ใน `kwargs` ผิด |
-| task ของ DAG ใน `pilot` fail ว่าหาไฟล์/bundle ไม่เจอ | worker ไม่มี `dag_bundle_config_list` (ข้อ 1) |
-| หลังแยก `pilot` มี import error ใหม่ หรือ parse ไฟล์มากกว่าเดิม (เช่น `utils/`, `tests/`) | pattern ใน `.airflowignore` ของ folder แม่ไม่มีผลกับ `pilot` แล้ว ต้องสร้าง `.airflowignore` ใน folder ของ app (ขั้นตอนที่ 4) |
-
-### แต่ละ bundle อ่าน `.airflowignore` ไหน
-
-แต่ละ processor อ่านเฉพาะ `.airflowignore` **ที่อยู่ใต้ root ของ bundle ตัวเอง** (root คือ `path` ใน `kwargs`) pattern ในแต่ละไฟล์เขียนเทียบกับ folder ที่ไฟล์นั้นอยู่
-
-| processor | root ของ bundle | `.airflowignore` ที่อ่าน |
-|---|---|---|
-| `--bundle-name dags-folder` | `/opt/airflow/dags` | ไฟล์ที่ root และในทุก folder ย่อยที่สแกน |
-| `--bundle-name pilot` | `/opt/airflow/dags/<company_name>/APzzzz-WWWWW` | เฉพาะไฟล์ใน folder ของ app และ folder ย่อยลงไป **ไม่อ่าน**ไฟล์ที่ root หรือที่ `<company_name>/` |
-
-- **ที่ root ยังต้องมี `.airflowignore`:** บรรทัด `<company_name>/APzzzz-WWWWW/` เป็นสิ่งเดียวที่ทำให้ `dags-folder` ไม่ parse folder ของ `pilot` การตั้ง bundle ไม่ได้ตัด path ที่ซ้อนกันออกให้เอง
-- **บรรทัดนี้ไม่กระทบ `pilot`** เพราะ `pilot` มองไม่เห็นไฟล์ที่ root
-- **pattern เดิมที่เคยซ่อนไฟล์ใน folder ของ app จะไม่มีผลกับ `pilot` อีก** เช่น ถ้าที่ root มี `<company_name>/APzzzz-WWWWW/utils/` ต้องย้ายไปไว้ใน `<company_name>/APzzzz-WWWWW/.airflowignore` เป็น `utils/` ไฟล์ใหม่นี้ไม่กระทบ `dags-folder` เพราะ `dags-folder` ข้าม folder นี้ไปทั้ง folder แล้ว
-
-> สมมติฐาน: อ้างอิงจากวิธีที่ `LocalDagBundle` สแกนไฟล์ใน Airflow 3 ยังไม่ได้ทดสอบกับเวอร์ชันที่ใช้จริง ต้องยืนยันใน sandbox (ดู "ทดสอบก่อนใช้กับเครื่องจริง") DagBag test ในขั้นตอนที่ 1 เริ่มจาก root ของ app เหมือน `pilot` จึงใช้ตรวจเรื่องนี้ได้
-
-> **ข้อจำกัด:** processor เฉพาะ bundle ลดเวลา**รอคิว** ไม่ได้ลดเวลา parse ของแต่ละไฟล์ ไฟล์ที่ใช้ 90 วินาทีก็ยังใช้ 90 วินาที และถ้าโค้ด top-level ของ DAG เรียกระบบภายนอกตัวเดียวกัน (DB, API, Vault) ทั้งสอง processor ยังแย่งกันอยู่
-
-## dag-processor 2 replicas: ช่วยจริงหรือ parse ซ้ำ
-
-ตอนนี้ deployment `airflow-dag-processor` มี `replicas = 2` (16 processes ต่อ pod) ตัวเลขจาก export ตัวอย่าง (DAG ที่ active 1,528 ตัว, เวลา parse รวม 21.5 ชม.):
-
-| | รอบ |
-|---|---|
-| รอบที่คาดไว้ ถ้า 2 pods แบ่งงานกัน (32 processes) | 40 นาที |
-| รอบที่คาดไว้ ถ้าได้ผลเท่า pod เดียว (16 processes) | 80 นาที |
-| **รอบที่วัดได้** (p99 ของอายุ DAG / อัตรา parse ต่อชั่วโมง) | **92 / 75 นาที** |
-
-รอบที่วัดได้ตรงกับ 16 processes แปลว่า replica ที่ 2 ไม่ได้ทำให้รอบสั้นลงครึ่งหนึ่ง สาเหตุที่เป็นไปได้ (**ยังไม่ได้ยืนยัน** เพราะ export ไม่บอกว่า pod ไหนเป็นคน parse):
-
-| สมมติฐาน | ตรวจอย่างไร (A0) | ถ้าใช่ |
-|---|---|---|
-| **H1: 2 pods parse ไฟล์ชุดเดียวกันซ้ำ** แต่ละ pod ทำครบทุกไฟล์เอง | ไฟล์เดียวกันขึ้นใน log ของทั้ง 2 pods ภายในรอบเดียวกัน | replica ที่ 2 ไม่ได้ช่วยให้เร็วขึ้น เพิ่มแค่งานซ้ำ, CPU และจำนวน version ของ DAG ที่ non-deterministic ให้ตั้ง `replicas = 1` แล้วใช้ CPU ที่เหลือไปทำ processor ของ bundle ใหม่แทน |
-| **H2: แบ่งงานกัน แต่ CPU ไม่พอ** CPU limit ของ pod หรือ node น้อยกว่า 16 core ต่อ pod | ดู `resources` ของ container และ `kubectl top pod` ว่าใช้ CPU เต็ม limit ตลอด | คอขวดคือ CPU ถ้าแยก bundle โดยไม่เพิ่ม CPU รอบจะไม่สั้นลง ต้องเพิ่ม `resources` หรือ node ก่อน |
-
-**ผลกับรายงาน (`generate-report.sh`)**
-- ค่าเริ่มต้น `PARSING_PROCESSES=32` คิดว่า 2 pods แบ่งงานกัน ถ้าเป็น H1 รอบที่คาดไว้ในรายงานจะเร็วกว่าจริงครึ่งหนึ่ง ให้สร้างอีกรายงานด้วย `PARSING_PROCESSES=16 ./generate-report.sh` เทียบกัน
-- **รอบที่วัดได้, Freshness และ overdue ยังถูกต้อง** เพราะวัดจาก `last_parsed_time` ซึ่ง pod ไหน parse ก็อัปเดตค่านี้ ตัวเลขชุดนี้คือเวลาที่ผู้ใช้ต้องรอจริง
-- `parse_seconds` เป็นค่าจาก pod ที่เขียนลง DB ล่าสุด ถ้า 2 pods อยู่ node เดียวกันแล้วแย่ง CPU กัน ค่าจะสูงกว่าเวลา parse จริงของไฟล์
-
-**กติกาสำหรับ processor แยก bundle:** ตั้ง `replicas = 1` ทุกตัว (ส่วน A4 และ B3 ตั้งไว้แล้ว) ถ้าอยากให้เร็วขึ้น ให้เพิ่ม `PARSING_PROCESSES` และ CPU แทนการเพิ่ม replica จนกว่าจะยืนยันได้ว่าหลาย replica แบ่งงานกันจริง
-
-## วิธีใช้คู่มือนี้
-
-| ส่วน | เป้าหมาย | วิธี | ขอบเขต |
-|---|---|---|---|
-| **A: ทดสอบ bundle แบบ ad-hoc** | ยืนยันว่าการแยก bundle ทำให้รอบการ parse สั้นลงจริง | `kubectl` (ไม่ใช้ Helm) ย้อนกลับได้ด้วยคำสั่งไม่กี่บรรทัด | **APzzzz-WWWWW อย่างเดียว** บน **dev** |
-| **B: ทำจริง** | แยก bundle แบบถาวร | Helm values + deployment ใน repo | APxxxx-YYYYY และ APzzzz-WWWWW |
-
-ทำ **ส่วน A ก่อน** ถ้าผลไม่ชัด ยังไม่ต้องทำส่วน B
-
----
-
-# ส่วน A: ทดสอบ bundle แบบ ad-hoc (kubectl, เฉพาะ APzzzz-WWWWW)
-
-**แนวคิด:** ให้ APzzzz-WWWWW มี bundle `pilot` และ dag-processor ของตัวเอง แล้วดูว่า DAG ของ APzzzz-WWWWW ถูก parse ถี่ขึ้นจริงหรือไม่ ทุกอย่างทำด้วย `kubectl` บน dev และย้อนกลับได้
-
-> ⚠ **ก่อนเริ่ม**
-> - ทำบน **dev** เท่านั้น และแจ้งทีมที่ใช้ dev ขั้นตอนที่ A2 ทำให้ pod ของ Airflow restart
-> - ตรวจก่อนว่า server ที่ทดสอบมี DAG ของ APzzzz-WWWWW จริง (ใน export ตัวอย่าง DAG ของ APzzzz-WWWWW เป็น env `sit` ทั้งหมด) ถ้าไม่มี ให้เลือก app อื่นที่มี DAG บน server นั้นเป็นกลุ่มทดลองแทน
-> - ถ้าสร้าง bundle `pilot` ไปแล้ว ให้ใช้ตารางตรวจในหัวข้อ "ตั้ง bundle อย่างเดียวไม่ทำให้เร็วขึ้น" หาข้อที่ขาด แล้วทำเฉพาะขั้นตอนนั้น (A2–A5)
-> - ถ้า Airflow ถูกจัดการด้วย GitOps (Argo CD, Flux) ให้ **pause การ sync** ก่อน ไม่อย่างนั้นการแก้ด้วย `kubectl` จะถูกเขียนทับ
-> - `helm upgrade` ครั้งถัดไปจะเขียนทับ args ของ dag-processor แต่**จะไม่ลบ** env ที่เพิ่มด้วย `kubectl set env` ให้ทำ rollback (A7) ให้ครบก่อน `helm upgrade`
-> - ชื่อ label (`component=...`) ชื่อ deployment และ container อ้างจาก chart ทางการ ให้ตรวจในขั้นตอน A0
-
-## A0. ตรวจก่อนเริ่ม (อ่านอย่างเดียว)
-
-```sh
-NS=airflow
+kubectl -n $NS exec deploy/airflow-dag-processor -- airflow version
 kubectl -n $NS exec deploy/airflow-dag-processor -- airflow dag-processor --help | grep -i bundle   # ต้องมี --bundle-name
-kubectl -n $NS get deploy,sts -l 'component in (scheduler,api-server,triggerer,worker,dag-processor)'
+kubectl -n $NS exec deploy/airflow-dag-processor -- airflow config get-value dag_processor dag_bundle_config_list
+kubectl -n $NS exec deploy/airflow-dag-processor -- airflow config get-value core dag_ignore_file_syntax
+kubectl -n $NS exec deploy/airflow-dag-processor -- find /opt/airflow/dags -name .airflowignore
 kubectl -n $NS get deploy airflow-dag-processor \
-  -o jsonpath='{range .spec.template.spec.containers[*]}{.name}{"\n"}{end}'                     # container แรกต้องเป็น dag-processor
-
-# H1: 2 pods parse ไฟล์ซ้ำกันหรือไม่: ถ้าไฟล์เดียวกันขึ้นใน log ทั้ง 2 pods ห่างกันไม่ถึง 1 รอบ แปลว่าซ้ำ
-FILE=dev_<company_name>_apzzzz_wwwww_workflow_group2_corp.py   # ไฟล์ DAG ใดก็ได้ใน APzzzz-WWWWW
-for p in $(kubectl -n $NS get pods -l component=dag-processor -o name); do
-  echo "== $p"; kubectl -n $NS logs "$p" --since=3h | grep -F "$FILE" | tail -3
-done
-
-# H2: CPU พอหรือไม่: pod อยู่ node ไหน, limit เท่าไร, ใช้จริงเท่าไร
-kubectl -n $NS get pods -l component=dag-processor -o wide
-kubectl -n $NS get deploy airflow-dag-processor -o jsonpath='{.spec.template.spec.containers[0].resources}'; echo
-kubectl -n $NS top pod -l component=dag-processor
+  -o jsonpath='{range .spec.template.spec.containers[*]}{.name}{"\n"}{end}'   # ต้องมี container ชื่อ dag-processor
 ```
 
-จดผล H1/H2 ไว้ก่อนทำ A1 (ดูหัวข้อ "dag-processor 2 replicas") ถ้าเป็น H2 ให้แก้เรื่อง CPU ก่อน เพราะการทดสอบ bundle จะเห็นผลไม่ชัด
+ถ้าเคยทดลองแก้ด้วย `kubectl` มาก่อน (เช่น `kubectl set env` หรือสร้าง deployment ด้วยมือ) ให้ลบของเหล่านั้นก่อน `helm upgrade` จะไม่ลบ env ที่เพิ่มด้วย `kubectl set env` ให้
 
-**วัดค่าก่อนทดสอบ (baseline):** DAG ของ APzzzz-WWWWW ถูก parse ครั้งล่าสุดนานสุดกี่นาทีแล้ว
+**baseline:** DAG ของ app ถูก parse ครั้งล่าสุดนานสุดกี่นาทีแล้ว (เก็บไว้เทียบในขั้นตอนที่ 6)
 
 ```sql
 SELECT count(*) AS dags,
@@ -198,347 +79,282 @@ FROM dag
 WHERE NOT is_stale AND fileloc LIKE '%/<company_name>/APzzzz-WWWWW/%';
 ```
 
-## A1. เตรียมตัวแปร และสำรองค่าเดิม
+## ขั้นตอนที่ 1: ทดสอบว่า DAG ของ app parse ได้เมื่อเริ่มจาก folder ของ app
+
+bundle `pilot` เริ่มสแกนที่ folder ของ app จุดที่พังบ่อยคือ **import โค้ดร่วม**ที่อ้างจาก `/opt/airflow/dags` ทดสอบใน pod เดิมได้เลย
 
 ```sh
-NS=airflow
-BUNDLES='[{"name":"dags-folder","classpath":"airflow.dag_processing.bundles.local.LocalDagBundle","kwargs":{"path":"/opt/airflow/dags"}},{"name":"pilot","classpath":"airflow.dag_processing.bundles.local.LocalDagBundle","kwargs":{"path":"/opt/airflow/dags/<company_name>/APzzzz-WWWWW"}}]'
-kubectl -n $NS get deploy airflow-dag-processor \
-  -o jsonpath='{.spec.template.spec.containers[0].args}' > dag-processor-args-original.json
-cat dag-processor-args-original.json
-```
-
-## A2. ใส่ bundle config ให้ทุก component (pod จะ restart)
-
-```sh
-kubectl -n $NS set env deploy,sts -l 'component in (scheduler,api-server,triggerer,worker,dag-processor)' \
-  AIRFLOW__DAG_PROCESSOR__DAG_BUNDLE_CONFIG_LIST="$BUNDLES"
-```
-
-ใช้ label เจาะจงเฉพาะ component ของ Airflow เพื่อไม่ให้ Redis หรือ PgBouncer restart ไปด้วย ต้องใส่ทุก component เพราะ worker ต้องหาไฟล์ของ DAG ใน bundle `pilot` ตอนรัน task
-
-## A3. ให้ dag-processor เดิมดูแลเฉพาะ `dags-folder`
-
-```sh
-kubectl -n $NS patch deploy airflow-dag-processor --type json -p \
-  '[{"op":"replace","path":"/spec/template/spec/containers/0/args",
-     "value":["bash","-c","exec airflow dag-processor --bundle-name dags-folder"]}]'
-```
-
-## A4. สร้าง dag-processor ของ `pilot` (โคลนจาก deployment เดิม)
-
-```sh
-kubectl -n $NS get deploy airflow-dag-processor -o yaml | yq '
-  del(.metadata.uid, .metadata.resourceVersion, .metadata.creationTimestamp,
-      .metadata.generation, .metadata.managedFields, .metadata.annotations, .status) |
-  .metadata.name = "airflow-dag-processor-pilot" |
-  .metadata.labels.component = "dag-processor-pilot" |
-  .spec.replicas = 1 |
-  .spec.selector.matchLabels.component = "dag-processor-pilot" |
-  .spec.template.metadata.labels.component = "dag-processor-pilot" |
-  .spec.template.spec.containers[0].args = ["bash","-c","exec airflow dag-processor --bundle-name pilot"] |
-  .spec.template.spec.containers[0].env += [{"name":"AIRFLOW__DAG_PROCESSOR__PARSING_PROCESSES","value":"4"}]
-' | kubectl -n $NS apply -f -
-
-kubectl -n $NS rollout status deploy/airflow-dag-processor-pilot
-```
-
-การเปลี่ยน label `component` ทำให้ deployment เดิมไม่นับ pod ของ `pilot` เป็นของตัวเอง
-
-## A5. ตัด APzzzz-WWWWW ออกจาก `dags-folder` (`.airflowignore`)
-
-เพิ่มบรรทัดนี้ใน `.airflowignore` ที่ root ของ blob (ถ้ามีไฟล์อยู่แล้ว ให้เพิ่ม ไม่ใช่เขียนทับ):
-
-```
-<company_name>/APzzzz-WWWWW/
-```
-
-ทำขั้นนี้**หลัง** A4 เพื่อให้ processor ของ `pilot` เริ่มรับ DAG ไปก่อน ช่วงสั้น ๆ ระหว่าง A4 กับ A5 ที่ทั้งสอง bundle parse ไฟล์เดียวกันอาจทำให้ `bundle_name` ของ DAG สลับไปมา ถือว่ารับได้ในการทดสอบบน dev
-
-ถ้า `.airflowignore` ที่ root หรือที่ `<company_name>/` มี pattern ที่ชี้เข้าไปใน `APzzzz-WWWWW/` อยู่แล้ว ให้คัดลอก pattern นั้นไปไว้ใน `<company_name>/APzzzz-WWWWW/.airflowignore` โดยเขียนเทียบกับ folder ของ app (ดูหัวข้อ "แต่ละ bundle อ่าน .airflowignore ไหน")
-
-## A6. ตรวจและวัดผล (หลัง A5 ประมาณ 10–15 นาที)
-
-```sql
--- 1) DAG ของ APzzzz-WWWWW ต้องย้ายมาอยู่ bundle "pilot" ครบ และไม่เป็น stale
-SELECT bundle_name, is_stale, count(*) FROM dag
-WHERE fileloc LIKE '%/<company_name>/APzzzz-WWWWW/%' GROUP BY 1, 2;
-
--- 2) รอบการ parse ของแต่ละ bundle: parse ครั้งล่าสุดนานสุดกี่นาทีแล้ว
-SELECT bundle_name, count(*) AS dags,
-       round(extract(epoch FROM now() - min(last_parsed_time)) / 60) AS oldest_parse_min
-FROM dag WHERE NOT is_stale GROUP BY 1 ORDER BY 1;
-```
-
-**ตรวจเพิ่ม:**
-- Import Errors ใน UI ไม่มีรายการใหม่
-- log ของ `airflow-dag-processor-pilot` ไม่มี error: `kubectl -n $NS logs deploy/airflow-dag-processor-pilot --since=15m | grep -i error`
-- trigger DAG ของ APzzzz-WWWWW 1 ตัว แล้วดูว่า task รันผ่าน (worker หาไฟล์ใน bundle `pilot` เจอ)
-- ลองแก้ `doc_md` ของ DAG ใน APzzzz-WWWWW แล้ว deploy จับเวลาจนมี version ใหม่ใน UI
-
-**อ่านผล**
-
-| ผล | แปลว่า |
-|---|---|
-| `pilot` มี `oldest_parse_min` ไม่กี่นาที (เดิม ~75–90) และ deploy ขึ้นภายในไม่กี่นาที | เวลาที่รอเกิดจาก**คิวรวม** การแยก bundle ได้ผล ไปทำส่วน B |
-| `pilot` ยังนานใกล้เคียงเดิม | คอขวดอยู่ที่อื่น เช่น การ sync จาก blob หรือระบบภายนอกที่ DAG เรียก ให้ตรวจก่อนทำส่วน B |
-| DAG ของ APzzzz-WWWWW เป็น stale หรือมี import error | ปัญหา path หรือ import โค้ดร่วม ดูส่วน B ขั้นตอนที่ 1 (`PYTHONPATH`) แล้ว rollback |
-
-## A7. Rollback (ย้อนลำดับ)
-
-```sh
-# 1) ลบบรรทัด <company_name>/APzzzz-WWWWW/ ออกจาก .airflowignore บน blob
-# 2) ลบ dag-processor ของ pilot
-kubectl -n $NS delete deploy airflow-dag-processor-pilot
-# 3) คืน args เดิมของ dag-processor
-kubectl -n $NS patch deploy airflow-dag-processor --type json -p \
-  "[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args\",\"value\":$(cat dag-processor-args-original.json)}]"
-# 4) ลบ bundle config ออกจากทุก component (pod จะ restart)
-kubectl -n $NS set env deploy,sts -l 'component in (scheduler,api-server,triggerer,worker,dag-processor)' \
-  AIRFLOW__DAG_PROCESSOR__DAG_BUNDLE_CONFIG_LIST-
-```
-
-ตรวจหลัง rollback: DAG ของ APzzzz-WWWWW กลับมาอยู่ `dags-folder` และไม่เป็น stale (ใช้ SQL ข้อ 1 ใน A6) แล้วค่อยเปิด GitOps sync กลับ
-
----
-
-# ส่วน B: ทำจริง (Helm)
-
-## ขั้นตอนที่ 0: ตรวจเวอร์ชันและ CLI
-
-```sh
-helm -n airflow list                                              # ชื่อ release และเวอร์ชันของ chart
-helm -n airflow get values airflow -o yaml > values-current.yaml  # สำรอง values ปัจจุบัน
-kubectl -n airflow exec deploy/airflow-dag-processor -- airflow version
-kubectl -n airflow exec deploy/airflow-dag-processor -- airflow dag-processor --help | grep -i bundle
-kubectl -n airflow exec deploy/airflow-dag-processor -- \
-  airflow config get-value dag_processor dag_bundle_config_list
-```
-
-ผลที่ควรได้:
-- `--help` มี option `--bundle-name`
-- `dag_bundle_config_list` เป็น JSON list ที่มี bundle ชื่อ `dags-folder` และ path `/opt/airflow/dags` (หรือว่าง ซึ่งแปลว่าใช้ค่าเริ่มต้นแบบนี้)
-
-ถ้าไม่ตรง **ให้หยุด** แล้วปรับคู่มือตามเวอร์ชันจริงก่อน
-
----
-
-## ขั้นตอนที่ 1: ทดสอบว่า DAG parse ได้เมื่อ root เป็น folder ของ app
-
-จุดที่พังบ่อยที่สุดคือ **import โค้ดร่วม** ที่อ้างจาก `/opt/airflow/dags` ทดสอบใน pod เดิมได้เลย ขั้นตอนนี้ไม่เปลี่ยนแปลงอะไรในระบบ
-
-```sh
-kubectl -n airflow exec -it deploy/airflow-dag-processor -- bash
-
-# 1) ดู module ที่ import บ่อย เพื่อหาโค้ดร่วม
-grep -rhoE '^\s*(from|import)\s+[A-Za-z_][A-Za-z0-9_.]*' \
-  /opt/airflow/dags/<company_name>/APxxxx-YYYYY /opt/airflow/dags/<company_name>/APzzzz-WWWWW \
-  | awk '{print $2}' | sort | uniq -c | sort -rn | head -20
-
-# 2) parse เหมือน bundle ใหม่ แล้วนับ DAG และ import error
-python - <<'PY'
+kubectl -n airflow exec -it deploy/airflow-dag-processor -- python - <<'PY'
 try:
     from airflow.dag_processing.dagbag import DagBag   # Airflow 3.1+
 except ImportError:
     from airflow.models.dagbag import DagBag
-for path in ["/opt/airflow/dags/<company_name>/APxxxx-YYYYY", "/opt/airflow/dags/<company_name>/APzzzz-WWWWW"]:
-    bag = DagBag(path, include_examples=False)
-    print(path, "dags:", len(bag.dags), "import errors:", len(bag.import_errors))
-    for f, e in list(bag.import_errors.items())[:3]:
-        print("   ", f, e.strip().splitlines()[-1])
+bag = DagBag("/opt/airflow/dags/<company_name>/APzzzz-WWWWW", include_examples=False)
+print("dags:", len(bag.dags), "import errors:", len(bag.import_errors))
+for f, e in list(bag.import_errors.items())[:5]:
+    print("  ", f, e.strip().splitlines()[-1])
 PY
 ```
 
-ผลที่ควรได้: **APxxxx-YYYYY ประมาณ 426 DAG, APzzzz-WWWWW ประมาณ 30 DAG และไม่มี import error**
+- ผลที่ควรได้: **~30 DAG และไม่มี import error** (ใช้เวลาประมาณ 45 นาที เพราะ parse ทีละไฟล์)
+- ถ้ามี `ModuleNotFoundError` ให้เปิด `PYTHONPATH` ในขั้นตอนที่ 2 แล้วทดสอบซ้ำด้วย `PYTHONPATH=/opt/airflow/dags python - <<'PY' ...`
+- ถ้าจำนวน DAG มากกว่าเดิม หรือมีไฟล์ใน `utils/`, `tests/` ถูก parse ให้ดูหัวข้อ "`.airflowignore` ของแต่ละ bundle"
 
-- ถ้ามี `ModuleNotFoundError` ให้ตั้ง `PYTHONPATH=/opt/airflow/dags` ในขั้นตอนที่ 2 แล้วทดสอบซ้ำด้วย `PYTHONPATH=/opt/airflow/dags python - <<'PY' ...`
-- ขั้นตอนนี้ใช้เวลานาน เพราะต้อง parse APxxxx-YYYYY จริงทั้งหมด (ประมาณ 8 ชม. ของเวลา parse ถ้ารันแบบ process เดียว) ถ้าอยากเร็วขึ้น ให้ทดสอบเฉพาะไฟล์ตัวอย่างสัก 5–10 ไฟล์ก่อน
-
----
-
-## ขั้นตอนที่ 2: เพิ่ม config ใน `values-bundles.yaml`
-
-ตั้งผ่าน `config:` ของ chart เพื่อให้**ทุก component** (scheduler, API server, worker, triggerer, dag-processor) ได้ค่าเดียวกัน จำเป็นเพราะ worker ต้องหาไฟล์ DAG ผ่าน bundle ตอนรัน task
+## ขั้นตอนที่ 2: `values-pilot.yaml`
 
 ```yaml
 config:
   dag_processor:
+    # ใส่ใน config: เพื่อให้ทุก component (scheduler, api-server, worker, triggerer, dag-processor) ได้ค่าเดียวกัน
     dag_bundle_config_list: >-
       [
         {"name": "dags-folder",
          "classpath": "airflow.dag_processing.bundles.local.LocalDagBundle",
          "kwargs": {"path": "/opt/airflow/dags"}},
-        {"name": "heavy",
-         "classpath": "airflow.dag_processing.bundles.local.LocalDagBundle",
-         "kwargs": {"path": "/opt/airflow/dags/<company_name>/APxxxx-YYYYY"}},
         {"name": "pilot",
          "classpath": "airflow.dag_processing.bundles.local.LocalDagBundle",
          "kwargs": {"path": "/opt/airflow/dags/<company_name>/APzzzz-WWWWW"}}
       ]
 
-# ใส่เฉพาะถ้าขั้นตอนที่ 1 พบ ModuleNotFoundError
-env:
-  - name: PYTHONPATH
-    value: /opt/airflow/dags
-
-# dag-processor เดิมของ chart ให้ดูแลเฉพาะ bundle เดิม
+# processor default (2 replicas เดิม) ดูแลเฉพาะ dags-folder
 dagProcessor:
   args: ["bash", "-c", "exec airflow dag-processor --bundle-name dags-folder"]
-  # ใส่เฉพาะถ้า A0 ยืนยันว่าเป็น H1 (2 pods parse ซ้ำ)
-  # replicas: 1
+
+# ใส่เฉพาะถ้าขั้นตอนที่ 1 พบ ModuleNotFoundError
+# env:
+#   - name: PYTHONPATH
+#     value: /opt/airflow/dags
 ```
 
-ถ้าตั้ง `replicas: 1` ให้ตั้ง `AIRFLOW__DAG_PROCESSOR__PARSING_PROCESSES` ของ `dags-folder` ตาม CPU ที่ได้คืนมาด้วย แล้วเปลี่ยน `PARSING_PROCESSES` ตอนสร้างรายงานให้ตรงกับจำนวน process ที่ใช้จริง
+- ชื่อ `dags-folder` และ path `/opt/airflow/dags` ต้องตรงกับค่าเดิมที่เห็นในขั้นตอนที่ 0 DAG ของ app อื่นจึงไม่ต้องย้าย bundle
+- ถ้า `values-current.yaml` มี `config.dag_processor` หรือ `env:` อยู่แล้ว ให้**รวม**เข้าไปในไฟล์นี้ Helm เขียนทับ list ทั้งก้อน ไม่ได้ต่อท้าย
 
-ถ้า `values-current.yaml` มี `env:` อยู่แล้ว ให้**รวม** `PYTHONPATH` เข้าไปในรายการเดิม เพราะ Helm จะเขียนทับทั้ง list ไม่ได้ต่อท้าย
+## ขั้นตอนที่ 3: สคริปต์สร้าง `dag-processor-pilot` (Helm post-renderer)
 
----
+chart ทางการสร้าง dag-processor ได้ deployment เดียว สคริปต์นี้รับ manifest ที่ Helm render แล้ว คัดลอก deployment ของ dag-processor มาแก้เป็นของ `pilot` แล้วส่งกลับให้ Helm ข้อดี:
+- pod ของ `pilot` ได้ volume, secret และ env ครบเหมือน default
+- deployment ใหม่เป็นส่วนหนึ่งของ Helm release `helm upgrade` / `helm rollback` จัดการให้ และได้ของใหม่ทุกครั้งที่อัปเกรด chart
 
-## ขั้นตอนที่ 3: สร้าง dag-processor deployment สำหรับ `heavy` และ `pilot`
-
-chart ทางการมี dag-processor ได้แค่ deployment เดียว วิธีที่ปลอดภัยคือ **render ของเดิมจาก chart แล้วทำสำเนา** จะได้ volume, secret และ env ครบเหมือนเดิม
+บันทึกเป็น `add-pilot-processor.sh` ไว้ข้าง values แล้ว `chmod +x add-pilot-processor.sh`
 
 ```sh
-helm template airflow apache-airflow/airflow -n airflow --version <chart-version> \
-  -f values-current.yaml -f values-bundles.yaml \
-  --show-only templates/dag-processor/dag-processor-deployment.yaml > dag-processor-base.yaml
+#!/bin/sh
+# Helm post-renderer: add a dag-processor Deployment dedicated to one DAG bundle
+set -eu
+BUNDLE=pilot
+PROCS=4
 
-for b in heavy pilot; do
-  procs=16; [ "$b" = pilot ] && procs=4
-  yq "
-    .metadata.name += \"-$b\" |
-    .spec.replicas = 1 |
-    .spec.selector.matchLabels.component = \"dag-processor-$b\" |
-    .spec.template.metadata.labels.component = \"dag-processor-$b\" |
-    (.spec.template.spec.containers[] | select(.name == \"dag-processor\")).args =
-      [\"bash\", \"-c\", \"exec airflow dag-processor --bundle-name $b\"] |
-    (.spec.template.spec.containers[] | select(.name == \"dag-processor\")).env +=
-      [{\"name\": \"AIRFLOW__DAG_PROCESSOR__PARSING_PROCESSES\", \"value\": \"$procs\"}]
-  " dag-processor-base.yaml > dag-processor-$b.yaml
-done
+manifests=$(mktemp)
+trap 'rm -f "$manifests"' EXIT
+cat > "$manifests"
+
+cat "$manifests"
+printf '\n---\n'
+BUNDLE=$BUNDLE PROCS=$PROCS yq '
+  select(.kind == "Deployment" and .metadata.labels.component == "dag-processor")
+  | .metadata.name += "-" + strenv(BUNDLE)
+  | .metadata.labels.component = "dag-processor-" + strenv(BUNDLE)
+  | .spec.replicas = 1
+  | .spec.selector.matchLabels.component = "dag-processor-" + strenv(BUNDLE)
+  | .spec.template.metadata.labels.component = "dag-processor-" + strenv(BUNDLE)
+  | (.spec.template.spec.containers[] | select(.name == "dag-processor")) |= (
+      .args = ["bash", "-c", "exec airflow dag-processor --bundle-name " + strenv(BUNDLE)]
+      | .env += [{"name": "AIRFLOW__DAG_PROCESSOR__PARSING_PROCESSES", "value": strenv(PROCS)}]
+    )
+' "$manifests"
 ```
 
-**ข้อควรระวัง:**
-- **ต้องเปลี่ยน label `component`:** ไม่อย่างนั้น selector ของ deployment เดิมจะนับ pod ใหม่เป็นของตัวเอง
-- **path ของ template และชื่อ container** (`dag-processor`) ให้ตรวจจากผล `helm template` ของเวอร์ชันที่ใช้จริง
-- **ถ้าจัดการ infra ด้วย Terraform หรือ GitOps** ให้เก็บ `dag-processor-heavy.yaml` และ `dag-processor-pilot.yaml` ไว้ใน repo เดียวกับ values แล้ว apply ผ่านช่องทางนั้น ไม่ใช้ `kubectl apply` ด้วยมือ
-- **ทุกครั้งที่อัปเกรด chart** ต้อง render ไฟล์ทั้งสองใหม่ เพราะเป็นสำเนาจาก template ของเวอร์ชันเดิม
+- **ต้องเปลี่ยน label `component`:** ไม่อย่างนั้น deployment default จะนับ pod ของ `pilot` เป็นของตัวเอง
+- **`replicas = 1`:** ยังไม่รู้ว่าหลาย replica แบ่งงานกันจริงไหม (ดูหัวข้อ "dag-processor default มี 2 replicas") ถ้าอยากเร็วขึ้นให้เพิ่ม `PROCS` แทน
+- **Helm 4:** `--post-renderer` ต้องเป็น plugin แทนสคริปต์ ถ้าใช้ Helm 4 ให้ห่อสคริปต์เป็น post-renderer plugin หรือใช้วิธีในภาคผนวก
 
----
+ตรวจผลของสคริปต์ก่อน deploy ได้ (ไม่เปลี่ยนแปลงอะไรในระบบ):
 
-## ขั้นตอนที่ 4: `.airflowignore` ที่ root ของ blob
+```sh
+helm template $RELEASE apache-airflow/airflow -n $NS --version <chart-version> \
+  -f values-current.yaml -f values-pilot.yaml --post-renderer ./add-pilot-processor.sh \
+  | yq 'select(.kind == "Deployment" and (.metadata.labels.component | test("^dag-processor")))
+        | [.metadata.name, .spec.replicas, (.spec.template.spec.containers[] | select(.name == "dag-processor") | .args[-1])]'
+```
 
-ใส่ไฟล์ `.airflowignore` ที่ root ของ container ใน blob storage (จะปรากฏเป็น `/opt/airflow/dags/.airflowignore`) เพื่อไม่ให้ bundle `dags-folder` parse APxxxx-YYYYY และ APzzzz-WWWWW ซ้ำ:
+ต้องเห็น 2 deployment: `airflow-dag-processor` (2 replicas, `--bundle-name dags-folder`) และ `airflow-dag-processor-pilot` (1 replica, `--bundle-name pilot`)
+
+## ขั้นตอนที่ 4: deploy
+
+> ⚠ ทำใน**ช่วงที่ DAG ของ app ไม่มีรอบรัน** เพราะขั้นตอนที่ 5 อาจทำให้ DAG บางตัวเป็น stale ได้ไม่เกิน 1 รอบของ `pilot` (~10 นาที) และ pod ทุก component จะ restart เพราะ config เปลี่ยน
+
+```sh
+helm diff upgrade $RELEASE apache-airflow/airflow -n $NS --version <chart-version> \
+  -f values-current.yaml -f values-pilot.yaml --post-renderer ./add-pilot-processor.sh   # ต้องมี plugin helm-diff
+
+helm upgrade $RELEASE apache-airflow/airflow -n $NS --version <chart-version> \
+  -f values-current.yaml -f values-pilot.yaml --post-renderer ./add-pilot-processor.sh
+
+kubectl -n $NS rollout status deploy/airflow-dag-processor
+kubectl -n $NS rollout status deploy/airflow-dag-processor-pilot
+```
+
+**ต้องใส่ `--post-renderer ./add-pilot-processor.sh` ทุกครั้งที่ `helm upgrade`** จากนี้ไป ถ้าลืม Helm จะลบ `dag-processor-pilot` และ DAG ของ app จะไม่มีใคร parse
+
+## ขั้นตอนที่ 5: ตัด app ออกจาก `dags-folder` (`.airflowignore`)
+
+รอให้ `dag-processor-pilot` parse ครบ 1 รอบก่อน (**~15 นาทีหลังขั้นตอนที่ 4**) แล้วเพิ่มบรรทัดนี้ใน `.airflowignore` ที่ root ของ blob (`/opt/airflow/dags/.airflowignore`) ถ้ามีไฟล์อยู่แล้ว ให้**เพิ่มบรรทัด** อย่าเขียนทับ
 
 ```
-<company_name>/APxxxx-YYYYY/
 <company_name>/APzzzz-WWWWW/
 ```
 
-- `[core] dag_ignore_file_syntax` ใน Airflow 3.x มีค่าเริ่มต้นเป็น **`glob`** (Airflow 2.x เป็น `regexp`) ให้ตรวจค่าจริงด้วย `airflow config get-value core dag_ignore_file_syntax` ก่อน pattern ในคู่มือนี้เขียนแบบ glob (รูปแบบเดียวกับ `.gitignore`) ถ้าในระบบตั้งเป็น `regexp` อยู่ บรรทัด `<company_name>/APxxxx-YYYYY/` ก็ยังใช้ได้เหมือนกัน แต่ pattern ที่มี `*` ต้องเขียนใหม่เป็น regexp
-- ถ้ามี `.airflowignore` อยู่แล้ว ให้**เพิ่มบรรทัด** ไม่ใช่เขียนทับ
-- ไฟล์นี้ไม่ส่งผลกับ bundle `heavy` และ `pilot` เพราะ bundle ทั้งสองเริ่มที่ folder ย่อย (ควรตรวจในขั้นตอนที่ 6)
-- **pattern ที่ต้องใช้กับ `heavy`/`pilot` ต้องอยู่ใน folder ของ app:** pattern เดิมใน `.airflowignore` ที่ root หรือที่ `<company_name>/` ซึ่งชี้เข้าไปใน folder ของ app จะไม่มีผลอีก ให้ย้ายไปไว้ใน `.airflowignore` ของแต่ละ app โดยเขียนเทียบกับ folder ของ app:
+- เขียนแบบนี้ใช้ได้ทั้ง syntax `glob` (ค่าเริ่มต้นของ Airflow 3.x) และ `regexp` ไม่ต้องมี `/**` และห้ามมี `/` นำหน้า
+- **ทำไมต้องรอ:** ถ้าตัดก่อนที่ `pilot` จะ parse DAG ครบ `dags-folder` จะเห็นว่าไฟล์หายไปแล้วตั้ง DAG ที่ยังเป็น `bundle_name = dags-folder` เป็น stale จนกว่า `pilot` จะ parse ถึง ในช่วงรอ ทั้งสอง processor parse ไฟล์เดียวกัน `bundle_name` จึงสลับไปมาได้ ถือว่าปกติ
 
-  ```
-  # /opt/airflow/dags/.airflowignore (เดิม)       → /opt/airflow/dags/<company_name>/APxxxx-YYYYY/.airflowignore (ใหม่)
-  <company_name>/APxxxx-YYYYY/utils/               → utils/
-  <company_name>/APxxxx-YYYYY/**/*_test.py         → **/*_test.py
-  ```
-
-  หาไฟล์ ignore ทั้งหมดได้ด้วย `find /opt/airflow/dags -name .airflowignore` แล้วรัน DagBag test ในขั้นตอนที่ 1 ซ้ำหลังเพิ่มไฟล์ใหม่ จำนวน DAG ต้องเท่าเดิมและไม่มี import error
-
----
-
-## ขั้นตอนที่ 5: rollout (ทำในช่วงเวลาเดียวกัน)
-
-> ⚠ **อย่าปล่อยให้ 2 bundle ดูแล DAG เดียวกันพร้อมกัน** ไม่อย่างนั้น `bundle_name` ของ DAG จะสลับไปมาตามว่า bundle ไหน parse ล่าสุด ให้ทำขั้นตอน 5.2–5.4 ต่อกันใน maintenance window เดียว
-
-```sh
-# 5.1 ดูการเปลี่ยนแปลงก่อน (ต้องมี plugin helm-diff)
-helm diff upgrade airflow apache-airflow/airflow -n airflow --version <chart-version> \
-  -f values-current.yaml -f values-bundles.yaml
-
-# 5.2 อัปโหลด .airflowignore ขึ้น blob
-
-# 5.3 อัปเกรด config ของทุก component
-helm upgrade airflow apache-airflow/airflow -n airflow --version <chart-version> \
-  -f values-current.yaml -f values-bundles.yaml
-
-# 5.4 สร้าง dag-processor ใหม่
-kubectl -n airflow apply -f dag-processor-heavy.yaml -f dag-processor-pilot.yaml
-kubectl -n airflow rollout status deploy/airflow-dag-processor
-kubectl -n airflow rollout status deploy/airflow-dag-processor-heavy
-kubectl -n airflow rollout status deploy/airflow-dag-processor-pilot
-```
-
----
-
-## ขั้นตอนที่ 6: ตรวจหลัง rollout
+## ขั้นตอนที่ 6: ตรวจและวัดผล (หลังขั้นตอนที่ 5 ประมาณ 15–30 นาที)
 
 ```sql
--- DAG ที่ active ของแต่ละ bundle
--- ควรได้ประมาณ: dags-folder ~1,070 / heavy 426 / pilot 30
-SELECT bundle_name, count(*) FROM dag WHERE NOT is_stale GROUP BY 1 ORDER BY 1;
+-- 1) DAG ของ app ต้องอยู่ bundle pilot ทั้งหมด และไม่เป็น stale  →  pilot | false | ~30
+SELECT bundle_name, is_stale, count(*) FROM dag
+WHERE fileloc LIKE '%/<company_name>/APzzzz-WWWWW/%' GROUP BY 1, 2;
 
--- ไม่ควรมี DAG ของ APxxxx-YYYYY/APzzzz-WWWWW กลายเป็น stale
-SELECT dag_id, bundle_name, last_parsed_time FROM dag
-WHERE is_stale
-  AND (fileloc LIKE '%/APxxxx-YYYYY/%' OR fileloc LIKE '%/APzzzz-WWWWW/%');
-
--- DAG ของ APxxxx-YYYYY/APzzzz-WWWWW ต้องไม่อยู่ใน dags-folder แล้ว (ตรวจว่า .airflowignore ทำงาน)
-SELECT bundle_name, count(*) FROM dag
-WHERE NOT is_stale AND fileloc LIKE '%/APxxxx-YYYYY/%' GROUP BY 1;
+-- 2) รอบของแต่ละ bundle  →  pilot ไม่เกิน ~10 นาที
+SELECT bundle_name, count(*) AS dags,
+       round(extract(epoch FROM now() - min(last_parsed_time)) / 60) AS oldest_parse_min
+FROM dag WHERE NOT is_stale GROUP BY 1 ORDER BY 1;
 ```
 
-**ตรวจเพิ่ม:**
-- **Import Errors** ใน UI ต้องไม่มีรายการใหม่
-- **log ของ dag-processor ทั้ง 3 ตัว** ต้องไม่มี error เรื่อง bundle:
-  ```sh
-  for d in airflow-dag-processor airflow-dag-processor-heavy airflow-dag-processor-pilot; do
-    echo "== $d"; kubectl -n airflow logs deploy/$d --since=15m | grep -iE 'error|bundle' | tail -5
-  done
-  ```
-- **trigger DAG ทดสอบ 1 ตัวจากแต่ละ bundle** เพื่อยืนยันว่า worker หาไฟล์เจอและรัน task ได้
-- **วัดผล:** รัน export ซ้ำทุก 10–15 นาทีสัก 2–3 ชม. แล้วสร้างรายงานด้วย `./generate-report.sh` เทียบรอบก่อนและหลัง รายงานอ่านคอลัมน์ `bundle_name` อยู่แล้ว ให้ตั้ง `PARSING_PROCESSES` เท่ากับจำนวน process ที่**ทำงานได้จริง** (ถ้าเป็น H1 ให้นับแค่ pod เดียว) ไม่อย่างนั้นรอบที่คาดไว้จะเร็วกว่าจริง
-- **ทดสอบกับ APzzzz-WWWWW:** deploy การแก้เล็ก ๆ ใน APzzzz-WWWWW แล้วจับเวลาจน version ใหม่ขึ้น UI เทียบกับก่อนแยก ถ้าลดจากระดับชั่วโมงเหลือไม่กี่นาที แปลว่าเวลารอเดิมเกิดจากคิวรวม
+```sh
+kubectl -n $NS logs deploy/airflow-dag-processor-pilot --since=30m | grep -iE 'error|bundle' | tail -20
+```
+
+- Import Errors ใน UI ต้องไม่มีรายการใหม่
+- trigger DAG ของ app 1 ตัว แล้วดูว่า task รันผ่าน (แปลว่า worker หาไฟล์ใน bundle `pilot` เจอ)
+- **ทดสอบจริง:** แก้ `doc_md` ของ DAG ใน app แล้ว deploy จับเวลาจน version ใหม่ขึ้นใน UI เทียบกับ baseline
+
+| ผล | แปลว่า |
+|---|---|
+| `pilot` รอบไม่เกิน ~10 นาที และ deploy ขึ้น UI ภายในไม่กี่นาที | เวลาที่รอเกิดจาก**คิวรวม** การแยก bundle ได้ผล แยก app อื่นตามได้ |
+| `pilot` ยังช้าใกล้เคียงเดิม | คอขวดอยู่ที่อื่น เช่น การ sync จาก blob หรือระบบภายนอกที่ DAG เรียกตอน parse |
+| DAG ของ app เป็น stale หรือมี import error | ดูหัวข้อ "แก้ปัญหา" ถ้าแก้ไม่ได้ให้ rollback |
 
 ---
 
 ## Rollback
 
-ทำย้อนลำดับ ภายใน maintenance window เดียวกัน:
+**แบบปกติ** (DAG ไม่ stale ระหว่างย้อนกลับ):
 
 ```sh
-kubectl -n airflow delete -f dag-processor-heavy.yaml -f dag-processor-pilot.yaml
-# ลบ 2 บรรทัดที่เพิ่มออกจาก .airflowignore บน blob
-helm upgrade airflow apache-airflow/airflow -n airflow --version <chart-version> -f values-current.yaml
+# 1) หยุด processor ของ pilot ชั่วคราว (ขั้นตอนที่ 4 จะลบ deployment ให้เอง)
+kubectl -n $NS scale deploy/airflow-dag-processor-pilot --replicas=0
+# 2) ลบบรรทัด <company_name>/APzzzz-WWWWW/ ออกจาก .airflowignore บน blob
+# 3) รอจน dags-folder parse DAG ของ app ครบ (~1 รอบของ default, 75–90 นาที)
+#    SQL ข้อ 1 ในขั้นตอนที่ 6 ต้องได้ dags-folder | false | ~30
+# 4) deploy values เดิม โดยไม่ใส่ post-renderer
+helm upgrade $RELEASE apache-airflow/airflow -n $NS --version <chart-version> -f values-current.yaml
 ```
 
-หลังจากนั้น DAG ของ APxxxx-YYYYY และ APzzzz-WWWWW จะกลับมาอยู่ bundle `dags-folder` ในรอบ parse ถัดไป
+**แบบเร่งด่วน:** ทำข้อ 2 และข้อ 4 ทันที DAG ของ app อาจ stale หรือรัน task ไม่ได้จนกว่า `dags-folder` จะ parse ถึง (ไม่เกิน 1 รอบของ default)
+
+## แก้ปัญหา
+
+| อาการ | สาเหตุที่น่าจะเป็น |
+|---|---|
+| `pilot` ยังรอบละ ~75–90 นาที | ไม่มี `dag-processor-pilot` (ลืม `--post-renderer`) หรือ default ยังไม่มี `--bundle-name dags-folder` |
+| `bundle_name` ของ DAG สลับระหว่าง `dags-folder` กับ `pilot` หลังขั้นตอนที่ 5 | บรรทัดใน `.airflowignore` ไม่ match ตรวจ path และ `dag_ignore_file_syntax` |
+| DAG ของ app เป็น stale ทั้งที่ไฟล์ยังอยู่ | `dag-processor-pilot` ไม่ทำงาน หรือ path ใน `kwargs` ผิด |
+| task ของ DAG ใน `pilot` fail ว่าหาไฟล์หรือ bundle ไม่เจอ | worker ไม่มี `dag_bundle_config_list` (ต้องอยู่ใน `config:` ไม่ใช่ env ของ dag-processor อย่างเดียว) |
+| import error ใหม่ หรือมีไฟล์ใน `utils/`, `tests/` ถูก parse | pattern ใน `.airflowignore` ของ folder แม่ไม่มีผลกับ `pilot` แล้ว (ดูหัวข้อถัดไป) |
+| `ModuleNotFoundError` | เปิด `PYTHONPATH=/opt/airflow/dags` ใน `values-pilot.yaml` |
+
+ตรวจสิ่งที่ deploy อยู่จริง:
+
+```sh
+kubectl -n $NS get deploy -l 'component in (dag-processor,dag-processor-pilot)' \
+  -o custom-columns='NAME:.metadata.name,REPLICAS:.spec.replicas,ARGS:.spec.template.spec.containers[0].args'
+for c in scheduler api-server triggerer worker dag-processor dag-processor-pilot; do
+  pod=$(kubectl -n $NS get pods -l component=$c -o name | head -1)
+  [ -n "$pod" ] && echo "== $c" && kubectl -n $NS exec "$pod" -- \
+    airflow config get-value dag_processor dag_bundle_config_list
+done
+```
 
 ---
 
-## ทดสอบก่อนใช้กับเครื่องจริง
+## เรื่องที่ควรรู้
 
-| ระดับ | สิ่งที่ทำ | กระทบระบบ? |
+### `.airflowignore` ของแต่ละ bundle
+
+แต่ละ processor อ่านเฉพาะ `.airflowignore` **ที่อยู่ใต้ root ของ bundle ตัวเอง** pattern ในแต่ละไฟล์เขียนเทียบกับ folder ที่ไฟล์นั้นอยู่
+
+| processor | root ของ bundle | `.airflowignore` ที่อ่าน |
 |---|---|---|
-| 1 | ส่วน A ขั้นตอน A0 และส่วน B ขั้นตอนที่ 0–1 ใน pod เดิม | ไม่กระทบ |
-| 1.5 | ส่วน A (A1–A7) ทดสอบ bundle จริงเฉพาะ APzzzz-WWWWW บน dev | pod ของ dev restart 2 ครั้ง (A2, A7) |
-| 2 | `helm template`, `helm diff upgrade`, `helm upgrade --dry-run` | ไม่กระทบ |
-| 3 | sandbox บน k3s ที่ เครื่องส่วนตัว (Airflow 3.2.1): สร้าง `<company_name>/APxxxx-YYYYY` และ `<company_name>/APzzzz-WWWWW` พร้อม DAG ตัวอย่าง 2–3 ไฟล์ แล้วทำขั้นตอน 2–6 ทั้งหมด | ไม่กระทบเครื่องของทีม |
-| 4 | ทำทั้ง flow บน **dev** ก่อน แล้วค่อย **sit** | กระทบเฉพาะ env นั้น |
+| default (`dags-folder`) | `/opt/airflow/dags` | ไฟล์ที่ root และในทุก folder ย่อยที่สแกน |
+| `pilot` | `/opt/airflow/dags/<company_name>/APzzzz-WWWWW` | เฉพาะไฟล์ใน folder ของ app ลงไป **ไม่อ่าน**ไฟล์ที่ root หรือที่ `<company_name>/` |
 
-**สิ่งที่ต้องยืนยันใน sandbox (ระดับ 3):**
-- `airflow dag-processor --bundle-name` ทำงาน และแต่ละ pod parse เฉพาะ bundle ของตัวเอง
-- `.airflowignore` ที่ root ไม่ส่งผลกับ bundle ที่เริ่มที่ folder ย่อย แต่ `.airflowignore` ใน folder ของ app มีผล (ลองใส่ `utils/` แล้วดูว่าไฟล์ใน `utils/` ไม่ถูก parse)
-- ตอนย้าย DAG ข้าม bundle ประวัติ run และ version ยังอยู่ (เพราะ `dag_id` เดิม) และไม่มี DAG ค้างเป็น stale
-- task ของ DAG ใน bundle ใหม่รันบน worker ได้
+- บรรทัด `<company_name>/APzzzz-WWWWW/` ที่ root จึงตัด app ออกจาก default ได้ โดยไม่กระทบ `pilot`
+- pattern เดิมที่เคยซ่อนไฟล์ใน folder ของ app จะไม่มีผลกับ `pilot` อีก ให้ย้ายไปไว้ใน `<company_name>/APzzzz-WWWWW/.airflowignore` โดยเขียนเทียบกับ folder ของ app:
+
+  ```
+  # /opt/airflow/dags/.airflowignore (เดิม)      → <company_name>/APzzzz-WWWWW/.airflowignore (ใหม่)
+  <company_name>/APzzzz-WWWWW/utils/              → utils/
+  <company_name>/APzzzz-WWWWW/**/*_test.py        → **/*_test.py
+  ```
+
+- `[core] dag_ignore_file_syntax` ของ Airflow 3.x มีค่าเริ่มต้นเป็น `glob` (รูปแบบเดียวกับ `.gitignore`) Airflow 2.x เป็น `regexp` ให้ใช้ค่าที่ตรวจได้ในขั้นตอนที่ 0
+
+### dag-processor default มี 2 replicas
+
+รอบที่วัดได้ตอนนี้ (75–92 นาที) ตรงกับที่ได้จาก **16 processes** (80 นาที) ไม่ใช่ 32 (40 นาที) แปลว่า replica ที่ 2 ไม่ได้ทำให้รอบสั้นลงครึ่งหนึ่ง ยังไม่ได้ยืนยันว่าเป็นเพราะอะไร:
+
+| สมมติฐาน | วิธีตรวจ | ถ้าใช่ |
+|---|---|---|
+| **H1:** 2 pods parse ไฟล์ชุดเดียวกันซ้ำ | ไฟล์เดียวกันขึ้นใน log ของทั้ง 2 pods ห่างกันไม่ถึง 1 รอบ | replica ที่ 2 ไม่ได้ช่วยให้เร็วขึ้น ลดเหลือ 1 แล้วเอา CPU ไปให้ processor ของ bundle ใหม่ |
+| **H2:** แบ่งงานกัน แต่ CPU ไม่พอ | `kubectl top pod` ใช้ CPU เต็ม limit ตลอด | ต้องเพิ่ม CPU ก่อน แยก bundle อย่างเดียวจะไม่เร็วขึ้น |
+
+```sh
+FILE=<ไฟล์ DAG ใดก็ได้ของ app อื่น>.py
+for p in $(kubectl -n $NS get pods -l component=dag-processor -o name); do
+  echo "== $p"; kubectl -n $NS logs "$p" --since=3h | grep -F "$FILE" | tail -3
+done
+kubectl -n $NS get pods -l component=dag-processor -o wide
+kubectl -n $NS top pod -l component=dag-processor
+```
+
+งานในคู่มือนี้ไม่ได้เปลี่ยนจำนวน replica ของ default ส่วน `pilot` ใช้ 1 replica
+
+### วัดผลด้วยรายงาน
+
+รัน export ซ้ำทุก 10–15 นาทีสัก 2–3 ชม. แล้วสร้างรายงานด้วย `./generate-report.sh` รายงานอ่านคอลัมน์ `bundle_name` ได้ ให้ตั้ง `PARSING_PROCESSES` เท่ากับจำนวน process ที่ทำงานได้จริง (ค่าเริ่มต้น 32 ถือว่า 2 replicas แบ่งงานกัน ถ้าเป็น H1 ให้ใช้ 16) ไม่อย่างนั้นรอบที่คาดไว้จะดูเร็วกว่าที่เป็นจริง
+
+### ขั้นต่อไป (ถ้า `pilot` ได้ผล)
+
+- แยก app ที่ใช้เวลา parse มาก (ดูส่วน "By application" ในรายงาน) เพิ่ม bundle ใน `dag_bundle_config_list` เพิ่มบรรทัดใน `.airflowignore` ที่ root และเพิ่ม deployment ในสคริปต์ post-renderer (ทำซ้ำคำสั่ง `yq` ด้วย `BUNDLE` และ `PROCS` ของ app นั้น)
+- แก้ต้นเหตุที่ DAG หลายตัวใช้ประมาณ 90 วินาทีต่อไฟล์ ได้ผลมากกว่าการแยก bundle (หาจุดที่ช้าด้วย `python -m cProfile -s cumtime <ไฟล์ DAG>` ใน pod ของ dag-processor)
+- ให้ CI/CD เรียก `PUT /api/v2/parseDagFile/{file_token}` หลัง deploy เพื่อให้ไฟล์ที่แก้ได้ parse ก่อนไฟล์อื่น
 
 ---
 
-## ขั้นตอนถัดไป (ถ้าผลดี)
+## ภาคผนวก: ไม่ใช้ post-renderer
 
-- เพิ่ม bundle ของ app อื่นตามเวลา parse (ดูส่วน "By application" ในรายงาน)
-- แก้ต้นเหตุที่ DAG หลายร้อยตัวใช้ประมาณ 90 วินาทีต่อไฟล์ ได้ผลมากกว่าการแยก bundle (หาจุดที่ช้าด้วย `py-spy dump` หรือ `python -m cProfile -s cumtime <ไฟล์ DAG>` ใน pod ของ dag-processor)
-- ให้ CI/CD เรียก API `PUT /api/v2/parseDagFile/{file_token}` หลัง deploy เพื่อให้ไฟล์ที่แก้ได้ parse ก่อนไฟล์อื่น
+ใช้เมื่อเป็น Helm 4 หรือใช้ post-renderer ไม่ได้ render deployment ของ dag-processor จาก chart แล้วสร้างไฟล์ของ `pilot` เอง:
+
+```sh
+helm template $RELEASE apache-airflow/airflow -n $NS --version <chart-version> \
+  -f values-current.yaml -f values-pilot.yaml \
+  --show-only templates/dag-processor/dag-processor-deployment.yaml \
+  | ./add-pilot-processor.sh \
+  | yq 'select(.metadata.name == "airflow-dag-processor-pilot")' > dag-processor-pilot.yaml
+
+helm upgrade $RELEASE apache-airflow/airflow -n $NS --version <chart-version> \
+  -f values-current.yaml -f values-pilot.yaml
+kubectl -n $NS apply -f dag-processor-pilot.yaml
+```
+
+deployment นี้ไม่อยู่ใน Helm release ต้อง render ใหม่ทุกครั้งที่อัปเกรด chart และตอน rollback ต้องลบเองด้วย `kubectl -n $NS delete -f dag-processor-pilot.yaml` ตรวจ path ของ template ด้วย `helm template ... | grep '^# Source: .*dag-processor'`
+
+## สมมติฐานที่ยังไม่ได้ทดสอบกับเวอร์ชันที่ใช้จริง
+
+คู่มือนี้อ้างอิงจากความรู้เรื่อง Airflow 3 และ chart ทางการ ให้ยืนยันใน sandbox (เช่น k3s + Airflow 3.2.1 พร้อม DAG ตัวอย่าง 2–3 ไฟล์) หรือบน dev ก่อน:
+
+- `airflow dag-processor --bundle-name` ทำให้แต่ละ pod parse เฉพาะ bundle ของตัวเอง
+- `.airflowignore` ที่ root ไม่มีผลกับ bundle ที่เริ่มที่ folder ย่อย แต่ `.airflowignore` ใน folder ของ app มีผล
+- ตอนย้าย DAG ข้าม bundle ประวัติ run และ version ยังอยู่ (เพราะ `dag_id` เดิม) และไม่มี DAG ค้างเป็น stale
+- ชื่อ container (`dag-processor`), label `component` และ path ของ template ตรงกับ chart เวอร์ชันที่ใช้
+- task ของ DAG ใน bundle ใหม่รันบน worker ได้
