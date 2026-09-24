@@ -36,10 +36,95 @@
 | `heavy` | `/opt/airflow/dags/<company_name>/APxxxx-YYYYY` | deployment ใหม่ | 16 | 426 | 8.45 ชม. | ~32 นาที |
 | `pilot` | `/opt/airflow/dags/<company_name>/APzzzz-WWWWW` | deployment ใหม่ | 4 | 30 | 0.60 ชม. | ~9 นาที |
 
-\* รอบที่คาดไว้ = เวลา parse รวม ÷ parsing_processes สมมติว่าแต่ละ process ไม่ได้แย่งระบบภายนอกตัวเดียวกัน ตอนนี้ (ถ้า 2 pods parse ซ้ำกัน) รอบที่วัดได้อยู่ที่ประมาณ 60–90 นาที
+\* รอบที่คาดไว้ = เวลา parse รวม ÷ parsing_processes สมมติว่าแต่ละ process ไม่ได้แย่งระบบภายนอกตัวเดียวกัน ตอนนี้รอบที่วัดได้อยู่ที่ประมาณ 75–92 นาที ซึ่งเท่ากับที่ใช้ 16 processes ไม่ใช่ 32 (ดูหัวข้อ "dag-processor 2 replicas")
 
 - **คงชื่อ `dags-folder` ไว้:** DAG ส่วนใหญ่จะไม่ต้องย้าย bundle มีแค่ APxxxx-YYYYY (426) กับ APzzzz-WWWWW (30) ที่ย้าย
 - **APzzzz-WWWWW ใช้เป็นกลุ่มทดลอง:** median parse 88 วินาที มี 30 DAG เล็กพอจะเห็นผลชัดว่าเวลารอเกิดจากคิวรวมหรือจาก app เอง
+
+## ตั้ง bundle อย่างเดียวไม่ทำให้เร็วขึ้น: ต้องมี dag-processor เฉพาะ bundle
+
+bundle เป็นแค่**การแบ่งกลุ่มเชิงตรรกะ** ถ้า dag-processor ไม่ได้ระบุ `--bundle-name` มันจะ parse **ทุก bundle** ต่อกันในรอบเดียว ด้วย `parsing_processes` ชุดเดิม รอบจึงยังยาวเท่าเดิม (≈ เวลา parse รวม ÷ processes) สิ่งที่เปลี่ยนมีแค่ค่า `bundle_name` ของ DAG
+
+ความเร็วมาจากการให้ bundle มี **dag-processor (pod) ของตัวเอง** DAG ของ bundle นั้นจะไม่ต้องรอคิวรวมกับ app อื่น
+
+```
+ก่อน (หรือตั้ง bundle แต่ไม่ได้แยก processor)      หลัง (แยก processor)
+┌─────────────────────────────┐                 ┌───────────────────────────────────────┐
+│ airflow dag-processor       │                 │ airflow dag-processor                 │
+│  → dags-folder + pilot      │                 │   --bundle-name dags-folder  (16 proc)│
+│  (คิวเดียว ~75–90 นาที)       │                 ├───────────────────────────────────────┤
+└─────────────────────────────┘                 │ airflow dag-processor                 │
+                                                │   --bundle-name pilot         (4 proc)│
+                                                │  (คิวของ pilot เอง ~9 นาที)             │
+                                                └───────────────────────────────────────┘
+```
+
+ต้องมี**ครบทั้ง 4 ข้อ**:
+
+| # | สิ่งที่ต้องมี | ขั้นตอน | ถ้าขาด |
+|---|---|---|---|
+| 1 | `dag_bundle_config_list` ค่าเดียวกันใน**ทุก component** (scheduler, api-server, worker, triggerer, dag-processor) | A2 / B2 | worker หาไฟล์ของ DAG ใน `pilot` ไม่เจอตอนรัน task |
+| 2 | dag-processor เดิมรัน `airflow dag-processor --bundle-name dags-folder` | A3 / B2 | processor เดิมยัง parse `pilot` ด้วย ไม่ได้แยกจริง |
+| 3 | deployment **แยก** รัน `airflow dag-processor --bundle-name pilot` พร้อม `PARSING_PROCESSES` ของตัวเอง | A4 / B3 | ไม่มีใคร parse `pilot` โดยเฉพาะ |
+| 4 | `.airflowignore` ตัด `<company_name>/APzzzz-WWWWW/` ออกจาก `dags-folder` | A5 / B4 | ไฟล์ถูก parse **2 รอบ** (`dags-folder` เริ่มที่ `/opt/airflow/dags` จึงเห็น folder ย่อยด้วย) ช้าลง และ `bundle_name` สลับไปมา |
+
+**ตรวจว่าตอนนี้ครบหรือยัง** (ใช้ได้ทั้งก่อนเริ่มและหลังตั้ง bundle ไปแล้ว):
+
+```sh
+NS=airflow
+# ข้อ 2, 3: แต่ละ processor ผูกกับ bundle ไหน (ต้องเห็น --bundle-name ทุกตัว)
+kubectl -n $NS get deploy -l 'component in (dag-processor,dag-processor-pilot)' \
+  -o custom-columns='NAME:.metadata.name,REPLICAS:.spec.replicas,ARGS:.spec.template.spec.containers[0].args'
+
+# ข้อ 1: ทุก component เห็น bundle config เดียวกัน
+for c in scheduler api-server triggerer worker dag-processor; do
+  pod=$(kubectl -n $NS get pods -l component=$c -o name | head -1)
+  [ -n "$pod" ] && echo "== $c" && kubectl -n $NS exec "$pod" -- \
+    airflow config get-value dag_processor dag_bundle_config_list
+done
+
+# ข้อ 4
+kubectl -n $NS exec deploy/airflow-dag-processor -- cat /opt/airflow/dags/.airflowignore
+```
+
+```sql
+-- DAG ของ APzzzz-WWWWW ต้องอยู่ pilot ทั้งหมด ถ้ายังมีแถว dags-folder แปลว่าข้อ 2 หรือ 4 ขาด
+SELECT bundle_name, is_stale, count(*) FROM dag
+WHERE fileloc LIKE '%/<company_name>/APzzzz-WWWWW/%' GROUP BY 1, 2;
+```
+
+| อาการ | สาเหตุที่น่าจะเป็น |
+|---|---|
+| ตั้ง bundle แล้ว แต่ `oldest_parse_min` ของ `pilot` ยัง ~75–90 นาที | ไม่มี processor เฉพาะ `pilot` (ข้อ 2 หรือ 3 ขาด) |
+| `bundle_name` ของ DAG เดียวกันสลับระหว่าง `dags-folder` กับ `pilot` | `.airflowignore` ยังไม่ตัด folder (ข้อ 4) |
+| DAG ของ `pilot` เป็น stale ทั้งที่ไฟล์ยังอยู่ | ไม่มี processor ไหน parse `pilot` หรือ path ใน `kwargs` ผิด |
+| task ของ DAG ใน `pilot` fail ว่าหาไฟล์/bundle ไม่เจอ | worker ไม่มี `dag_bundle_config_list` (ข้อ 1) |
+
+> **ข้อจำกัด:** processor เฉพาะ bundle ลดเวลา**รอคิว** ไม่ได้ลดเวลา parse ของแต่ละไฟล์ ไฟล์ที่ใช้ 90 วินาทีก็ยังใช้ 90 วินาที และถ้าโค้ด top-level ของ DAG เรียกระบบภายนอกตัวเดียวกัน (DB, API, Vault) ทั้งสอง processor ยังแย่งกันอยู่
+
+## dag-processor 2 replicas: ช่วยจริงหรือ parse ซ้ำ
+
+ตอนนี้ deployment `airflow-dag-processor` มี `replicas = 2` (16 processes ต่อ pod) ตัวเลขจาก export ตัวอย่าง (DAG ที่ active 1,528 ตัว, เวลา parse รวม 21.5 ชม.):
+
+| | รอบ |
+|---|---|
+| รอบที่คาดไว้ ถ้า 2 pods แบ่งงานกัน (32 processes) | 40 นาที |
+| รอบที่คาดไว้ ถ้าได้ผลเท่า pod เดียว (16 processes) | 80 นาที |
+| **รอบที่วัดได้** (p99 ของอายุ DAG / อัตรา parse ต่อชั่วโมง) | **92 / 75 นาที** |
+
+รอบที่วัดได้ตรงกับ 16 processes แปลว่า replica ที่ 2 ไม่ได้ทำให้รอบสั้นลงครึ่งหนึ่ง สาเหตุที่เป็นไปได้ (**ยังไม่ได้ยืนยัน** เพราะ export ไม่บอกว่า pod ไหนเป็นคน parse):
+
+| สมมติฐาน | ตรวจอย่างไร (A0) | ถ้าใช่ |
+|---|---|---|
+| **H1: 2 pods parse ไฟล์ชุดเดียวกันซ้ำ** แต่ละ pod ทำครบทุกไฟล์เอง | ไฟล์เดียวกันขึ้นใน log ของทั้ง 2 pods ภายในรอบเดียวกัน | replica ที่ 2 ไม่ได้ช่วยให้เร็วขึ้น เพิ่มแค่งานซ้ำ, CPU และจำนวน version ของ DAG ที่ non-deterministic ให้ตั้ง `replicas = 1` แล้วใช้ CPU ที่เหลือไปทำ processor ของ bundle ใหม่แทน |
+| **H2: แบ่งงานกัน แต่ CPU ไม่พอ** CPU limit ของ pod หรือ node น้อยกว่า 16 core ต่อ pod | ดู `resources` ของ container และ `kubectl top pod` ว่าใช้ CPU เต็ม limit ตลอด | คอขวดคือ CPU ถ้าแยก bundle โดยไม่เพิ่ม CPU รอบจะไม่สั้นลง ต้องเพิ่ม `resources` หรือ node ก่อน |
+
+**ผลกับรายงาน (`generate-report.sh`)**
+- ค่าเริ่มต้น `PARSING_PROCESSES=32` คิดว่า 2 pods แบ่งงานกัน ถ้าเป็น H1 รอบที่คาดไว้ในรายงานจะเร็วกว่าจริงครึ่งหนึ่ง ให้สร้างอีกรายงานด้วย `PARSING_PROCESSES=16 ./generate-report.sh` เทียบกัน
+- **รอบที่วัดได้, Freshness และ overdue ยังถูกต้อง** เพราะวัดจาก `last_parsed_time` ซึ่ง pod ไหน parse ก็อัปเดตค่านี้ ตัวเลขชุดนี้คือเวลาที่ผู้ใช้ต้องรอจริง
+- `parse_seconds` เป็นค่าจาก pod ที่เขียนลง DB ล่าสุด ถ้า 2 pods อยู่ node เดียวกันแล้วแย่ง CPU กัน ค่าจะสูงกว่าเวลา parse จริงของไฟล์
+
+**กติกาสำหรับ processor แยก bundle:** ตั้ง `replicas = 1` ทุกตัว (ส่วน A4 และ B3 ตั้งไว้แล้ว) ถ้าอยากให้เร็วขึ้น ให้เพิ่ม `PARSING_PROCESSES` และ CPU แทนการเพิ่ม replica จนกว่าจะยืนยันได้ว่าหลาย replica แบ่งงานกันจริง
 
 ## วิธีใช้คู่มือนี้
 
@@ -58,6 +143,8 @@
 
 > ⚠ **ก่อนเริ่ม**
 > - ทำบน **dev** เท่านั้น และแจ้งทีมที่ใช้ dev ขั้นตอนที่ A2 ทำให้ pod ของ Airflow restart
+> - ตรวจก่อนว่า server ที่ทดสอบมี DAG ของ APzzzz-WWWWW จริง (ใน export ตัวอย่าง DAG ของ APzzzz-WWWWW เป็น env `sit` ทั้งหมด) ถ้าไม่มี ให้เลือก app อื่นที่มี DAG บน server นั้นเป็นกลุ่มทดลองแทน
+> - ถ้าสร้าง bundle `pilot` ไปแล้ว ให้ใช้ตารางตรวจในหัวข้อ "ตั้ง bundle อย่างเดียวไม่ทำให้เร็วขึ้น" หาข้อที่ขาด แล้วทำเฉพาะขั้นตอนนั้น (A2–A5)
 > - ถ้า Airflow ถูกจัดการด้วย GitOps (Argo CD, Flux) ให้ **pause การ sync** ก่อน ไม่อย่างนั้นการแก้ด้วย `kubectl` จะถูกเขียนทับ
 > - `helm upgrade` ครั้งถัดไปจะเขียนทับ args ของ dag-processor แต่**จะไม่ลบ** env ที่เพิ่มด้วย `kubectl set env` ให้ทำ rollback (A7) ให้ครบก่อน `helm upgrade`
 > - ชื่อ label (`component=...`) ชื่อ deployment และ container อ้างจาก chart ทางการ ให้ตรวจในขั้นตอน A0
@@ -71,12 +158,19 @@ kubectl -n $NS get deploy,sts -l 'component in (scheduler,api-server,triggerer,w
 kubectl -n $NS get deploy airflow-dag-processor \
   -o jsonpath='{range .spec.template.spec.containers[*]}{.name}{"\n"}{end}'                     # container แรกต้องเป็น dag-processor
 
-# (แนะนำ) 2 pods ตอนนี้ parse ไฟล์ซ้ำกันหรือไม่: ถ้าไฟล์เดียวกันขึ้นใน log ทั้ง 2 pods แปลว่าซ้ำ
+# H1: 2 pods parse ไฟล์ซ้ำกันหรือไม่: ถ้าไฟล์เดียวกันขึ้นใน log ทั้ง 2 pods ห่างกันไม่ถึง 1 รอบ แปลว่าซ้ำ
 FILE=dev_<company_name>_apzzzz_wwwww_workflow_group2_corp.py   # ไฟล์ DAG ใดก็ได้ใน APzzzz-WWWWW
 for p in $(kubectl -n $NS get pods -l component=dag-processor -o name); do
   echo "== $p"; kubectl -n $NS logs "$p" --since=3h | grep -F "$FILE" | tail -3
 done
+
+# H2: CPU พอหรือไม่: pod อยู่ node ไหน, limit เท่าไร, ใช้จริงเท่าไร
+kubectl -n $NS get pods -l component=dag-processor -o wide
+kubectl -n $NS get deploy airflow-dag-processor -o jsonpath='{.spec.template.spec.containers[0].resources}'; echo
+kubectl -n $NS top pod -l component=dag-processor
 ```
+
+จดผล H1/H2 ไว้ก่อนทำ A1 (ดูหัวข้อ "dag-processor 2 replicas") ถ้าเป็น H2 ให้แก้เรื่อง CPU ก่อน เพราะการทดสอบ bundle จะเห็นผลไม่ชัด
 
 **วัดค่าก่อนทดสอบ (baseline):** DAG ของ APzzzz-WWWWW ถูก parse ครั้งล่าสุดนานสุดกี่นาทีแล้ว
 
@@ -167,7 +261,7 @@ FROM dag WHERE NOT is_stale GROUP BY 1 ORDER BY 1;
 
 | ผล | แปลว่า |
 |---|---|
-| `pilot` มี `oldest_parse_min` ไม่กี่นาที (เดิม ~60–90) และ deploy ขึ้นภายในไม่กี่นาที | เวลาที่รอเกิดจาก**คิวรวม** การแยก bundle ได้ผล ไปทำส่วน B |
+| `pilot` มี `oldest_parse_min` ไม่กี่นาที (เดิม ~75–90) และ deploy ขึ้นภายในไม่กี่นาที | เวลาที่รอเกิดจาก**คิวรวม** การแยก bundle ได้ผล ไปทำส่วน B |
 | `pilot` ยังนานใกล้เคียงเดิม | คอขวดอยู่ที่อื่น เช่น การ sync จาก blob หรือระบบภายนอกที่ DAG เรียก ให้ตรวจก่อนทำส่วน B |
 | DAG ของ APzzzz-WWWWW เป็น stale หรือมี import error | ปัญหา path หรือ import โค้ดร่วม ดูส่วน B ขั้นตอนที่ 1 (`PYTHONPATH`) แล้ว rollback |
 
@@ -271,7 +365,11 @@ env:
 # dag-processor เดิมของ chart ให้ดูแลเฉพาะ bundle เดิม
 dagProcessor:
   args: ["bash", "-c", "exec airflow dag-processor --bundle-name dags-folder"]
+  # ใส่เฉพาะถ้า A0 ยืนยันว่าเป็น H1 (2 pods parse ซ้ำ)
+  # replicas: 1
 ```
+
+ถ้าตั้ง `replicas: 1` ให้ตั้ง `AIRFLOW__DAG_PROCESSOR__PARSING_PROCESSES` ของ `dags-folder` ตาม CPU ที่ได้คืนมาด้วย แล้วเปลี่ยน `PARSING_PROCESSES` ตอนสร้างรายงานให้ตรงกับจำนวน process ที่ใช้จริง
 
 ถ้า `values-current.yaml` มี `env:` อยู่แล้ว ให้**รวม** `PYTHONPATH` เข้าไปในรายการเดิม เพราะ Helm จะเขียนทับทั้ง list ไม่ได้ต่อท้าย
 
@@ -374,7 +472,7 @@ WHERE NOT is_stale AND fileloc LIKE '%/APxxxx-YYYYY/%' GROUP BY 1;
   done
   ```
 - **trigger DAG ทดสอบ 1 ตัวจากแต่ละ bundle** เพื่อยืนยันว่า worker หาไฟล์เจอและรัน task ได้
-- **วัดผล:** รัน export ซ้ำทุก 10–15 นาทีสัก 2–3 ชม. แล้วสร้างรายงานด้วย `./generate-report.sh` เทียบรอบก่อนและหลัง รายงานอ่านคอลัมน์ `bundle_name` อยู่แล้ว
+- **วัดผล:** รัน export ซ้ำทุก 10–15 นาทีสัก 2–3 ชม. แล้วสร้างรายงานด้วย `./generate-report.sh` เทียบรอบก่อนและหลัง รายงานอ่านคอลัมน์ `bundle_name` อยู่แล้ว ให้ตั้ง `PARSING_PROCESSES` เท่ากับจำนวน process ที่**ทำงานได้จริง** (ถ้าเป็น H1 ให้นับแค่ pod เดียว) ไม่อย่างนั้นรอบที่คาดไว้จะเร็วกว่าจริง
 - **ทดสอบกับ APzzzz-WWWWW:** deploy การแก้เล็ก ๆ ใน APzzzz-WWWWW แล้วจับเวลาจน version ใหม่ขึ้น UI เทียบกับก่อนแยก ถ้าลดจากระดับชั่วโมงเหลือไม่กี่นาที แปลว่าเวลารอเดิมเกิดจากคิวรวม
 
 ---
