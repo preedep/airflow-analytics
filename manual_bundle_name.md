@@ -42,7 +42,7 @@ bundle เป็นแค่การแบ่งกลุ่ม ถ้า dag-p
 | # | สิ่งที่ต้องมี | ทำในขั้นตอน | ถ้าขาด |
 |---|---|---|---|
 | 1 | `dag_bundle_config_list` มี bundle `pilot` และตั้งให้**ทุก component** | 2 | worker หาไฟล์ของ DAG ใน `pilot` ไม่เจอตอนรัน task |
-| 2 | processor default รัน `--bundle-name dags-folder` | 2 | default ยัง parse `pilot` ด้วย ไม่ได้แยกจริง |
+| 2 | processor default รัน `--bundle-name dags-folder` | 2 | processor ที่ไม่ระบุ bundle จะ parse ทุก bundle `pilot` ยังเร็ว เพราะมี pod ของตัวเอง แต่ default จะ parse ไฟล์ของ `pilot` ซ้ำในคิวรวม |
 | 3 | deployment แยกรัน `--bundle-name pilot` | 3 | ไม่มี processor ของ `pilot` โดยเฉพาะ |
 | 4 | `.airflowignore` ที่ root ตัด folder ของ app ออกจาก `dags-folder` | 5 | ไฟล์ถูก parse 2 ครั้ง และ `bundle_name` ของ DAG สลับไปมา |
 
@@ -256,7 +256,8 @@ helm upgrade $RELEASE apache-airflow/airflow -n $NS --version <chart-version> -f
 
 | อาการ | สาเหตุที่น่าจะเป็น |
 |---|---|
-| `pilot` ยังรอบละ ~75–90 นาที | ไม่มี `dag-processor-pilot` (ลืม `--post-renderer`) หรือ default ยังไม่มี `--bundle-name dags-folder` |
+| `pilot` ยังรอบละ ~75–90 นาที | ไม่มี `dag-processor-pilot` (ลืม `--post-renderer`) หรือ pod ของ `pilot` ไม่ได้รัน `--bundle-name pilot` |
+| `pilot` เร็วแล้ว แต่ log ของ pod default ยังมีไฟล์ของ app | default ไม่ได้ระบุ `--bundle-name dags-folder` จึง parse ทุก bundle รวม `pilot` ซ้ำ (`.airflowignore` ที่ root ช่วยไม่ได้ เพราะ `pilot` เป็นอีก bundle) |
 | `bundle_name` ของ DAG สลับระหว่าง `dags-folder` กับ `pilot` หลังขั้นตอนที่ 5 | บรรทัดใน `.airflowignore` ไม่ match ตรวจ path และ `dag_ignore_file_syntax` |
 | DAG ของ app เป็น stale ทั้งที่ไฟล์ยังอยู่ | `dag-processor-pilot` ไม่ทำงาน หรือ path ใน `kwargs` ผิด |
 | task ของ DAG ใน `pilot` fail ว่าหาไฟล์หรือ bundle ไม่เจอ | worker ไม่มี `dag_bundle_config_list` (ต้องอยู่ใน `config:` ไม่ใช่ env ของ dag-processor อย่างเดียว) |
