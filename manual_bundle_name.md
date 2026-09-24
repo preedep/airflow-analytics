@@ -83,8 +83,9 @@ for c in scheduler api-server triggerer worker dag-processor; do
     airflow config get-value dag_processor dag_bundle_config_list
 done
 
-# ข้อ 4
+# ข้อ 4: ไฟล์ ignore ที่ root และทุกไฟล์ใน folder ย่อย (ดูหัวข้อ "แต่ละ bundle อ่าน .airflowignore ไหน")
 kubectl -n $NS exec deploy/airflow-dag-processor -- cat /opt/airflow/dags/.airflowignore
+kubectl -n $NS exec deploy/airflow-dag-processor -- find /opt/airflow/dags -name .airflowignore
 ```
 
 ```sql
@@ -99,6 +100,22 @@ WHERE fileloc LIKE '%/<company_name>/APzzzz-WWWWW/%' GROUP BY 1, 2;
 | `bundle_name` ของ DAG เดียวกันสลับระหว่าง `dags-folder` กับ `pilot` | `.airflowignore` ยังไม่ตัด folder (ข้อ 4) |
 | DAG ของ `pilot` เป็น stale ทั้งที่ไฟล์ยังอยู่ | ไม่มี processor ไหน parse `pilot` หรือ path ใน `kwargs` ผิด |
 | task ของ DAG ใน `pilot` fail ว่าหาไฟล์/bundle ไม่เจอ | worker ไม่มี `dag_bundle_config_list` (ข้อ 1) |
+| หลังแยก `pilot` มี import error ใหม่ หรือ parse ไฟล์มากกว่าเดิม (เช่น `utils/`, `tests/`) | pattern ใน `.airflowignore` ของ folder แม่ไม่มีผลกับ `pilot` แล้ว ต้องสร้าง `.airflowignore` ใน folder ของ app (ขั้นตอนที่ 4) |
+
+### แต่ละ bundle อ่าน `.airflowignore` ไหน
+
+แต่ละ processor อ่านเฉพาะ `.airflowignore` **ที่อยู่ใต้ root ของ bundle ตัวเอง** (root คือ `path` ใน `kwargs`) pattern ในแต่ละไฟล์เขียนเทียบกับ folder ที่ไฟล์นั้นอยู่
+
+| processor | root ของ bundle | `.airflowignore` ที่อ่าน |
+|---|---|---|
+| `--bundle-name dags-folder` | `/opt/airflow/dags` | ไฟล์ที่ root และในทุก folder ย่อยที่สแกน |
+| `--bundle-name pilot` | `/opt/airflow/dags/<company_name>/APzzzz-WWWWW` | เฉพาะไฟล์ใน folder ของ app และ folder ย่อยลงไป **ไม่อ่าน**ไฟล์ที่ root หรือที่ `<company_name>/` |
+
+- **ที่ root ยังต้องมี `.airflowignore`:** บรรทัด `<company_name>/APzzzz-WWWWW/` เป็นสิ่งเดียวที่ทำให้ `dags-folder` ไม่ parse folder ของ `pilot` การตั้ง bundle ไม่ได้ตัด path ที่ซ้อนกันออกให้เอง
+- **บรรทัดนี้ไม่กระทบ `pilot`** เพราะ `pilot` มองไม่เห็นไฟล์ที่ root
+- **pattern เดิมที่เคยซ่อนไฟล์ใน folder ของ app จะไม่มีผลกับ `pilot` อีก** เช่น ถ้าที่ root มี `<company_name>/APzzzz-WWWWW/utils/` ต้องย้ายไปไว้ใน `<company_name>/APzzzz-WWWWW/.airflowignore` เป็น `utils/` ไฟล์ใหม่นี้ไม่กระทบ `dags-folder` เพราะ `dags-folder` ข้าม folder นี้ไปทั้ง folder แล้ว
+
+> สมมติฐาน: อ้างอิงจากวิธีที่ `LocalDagBundle` สแกนไฟล์ใน Airflow 3 ยังไม่ได้ทดสอบกับเวอร์ชันที่ใช้จริง ต้องยืนยันใน sandbox (ดู "ทดสอบก่อนใช้กับเครื่องจริง") DagBag test ในขั้นตอนที่ 1 เริ่มจาก root ของ app เหมือน `pilot` จึงใช้ตรวจเรื่องนี้ได้
 
 > **ข้อจำกัด:** processor เฉพาะ bundle ลดเวลา**รอคิว** ไม่ได้ลดเวลา parse ของแต่ละไฟล์ ไฟล์ที่ใช้ 90 วินาทีก็ยังใช้ 90 วินาที และถ้าโค้ด top-level ของ DAG เรียกระบบภายนอกตัวเดียวกัน (DB, API, Vault) ทั้งสอง processor ยังแย่งกันอยู่
 
@@ -237,6 +254,8 @@ kubectl -n $NS rollout status deploy/airflow-dag-processor-pilot
 ```
 
 ทำขั้นนี้**หลัง** A4 เพื่อให้ processor ของ `pilot` เริ่มรับ DAG ไปก่อน ช่วงสั้น ๆ ระหว่าง A4 กับ A5 ที่ทั้งสอง bundle parse ไฟล์เดียวกันอาจทำให้ `bundle_name` ของ DAG สลับไปมา ถือว่ารับได้ในการทดสอบบน dev
+
+ถ้า `.airflowignore` ที่ root หรือที่ `<company_name>/` มี pattern ที่ชี้เข้าไปใน `APzzzz-WWWWW/` อยู่แล้ว ให้คัดลอก pattern นั้นไปไว้ใน `<company_name>/APzzzz-WWWWW/.airflowignore` โดยเขียนเทียบกับ folder ของ app (ดูหัวข้อ "แต่ละ bundle อ่าน .airflowignore ไหน")
 
 ## A6. ตรวจและวัดผล (หลัง A5 ประมาณ 10–15 นาที)
 
@@ -416,9 +435,18 @@ done
 <company_name>/APzzzz-WWWWW/
 ```
 
-- ค่าเริ่มต้นเป็น regexp ถ้าตั้ง `[core] dag_ignore_file_syntax = glob` ต้องเขียนเป็น `<company_name>/APxxxx-YYYYY/**`
+- `[core] dag_ignore_file_syntax` ใน Airflow 3.x มีค่าเริ่มต้นเป็น **`glob`** (Airflow 2.x เป็น `regexp`) ให้ตรวจค่าจริงด้วย `airflow config get-value core dag_ignore_file_syntax` ก่อน pattern ในคู่มือนี้เขียนแบบ glob (รูปแบบเดียวกับ `.gitignore`) ถ้าในระบบตั้งเป็น `regexp` อยู่ บรรทัด `<company_name>/APxxxx-YYYYY/` ก็ยังใช้ได้เหมือนกัน แต่ pattern ที่มี `*` ต้องเขียนใหม่เป็น regexp
 - ถ้ามี `.airflowignore` อยู่แล้ว ให้**เพิ่มบรรทัด** ไม่ใช่เขียนทับ
 - ไฟล์นี้ไม่ส่งผลกับ bundle `heavy` และ `pilot` เพราะ bundle ทั้งสองเริ่มที่ folder ย่อย (ควรตรวจในขั้นตอนที่ 6)
+- **pattern ที่ต้องใช้กับ `heavy`/`pilot` ต้องอยู่ใน folder ของ app:** pattern เดิมใน `.airflowignore` ที่ root หรือที่ `<company_name>/` ซึ่งชี้เข้าไปใน folder ของ app จะไม่มีผลอีก ให้ย้ายไปไว้ใน `.airflowignore` ของแต่ละ app โดยเขียนเทียบกับ folder ของ app:
+
+  ```
+  # /opt/airflow/dags/.airflowignore (เดิม)       → /opt/airflow/dags/<company_name>/APxxxx-YYYYY/.airflowignore (ใหม่)
+  <company_name>/APxxxx-YYYYY/utils/               → utils/
+  <company_name>/APxxxx-YYYYY/**/*_test.py         → **/*_test.py
+  ```
+
+  หาไฟล์ ignore ทั้งหมดได้ด้วย `find /opt/airflow/dags -name .airflowignore` แล้วรัน DagBag test ในขั้นตอนที่ 1 ซ้ำหลังเพิ่มไฟล์ใหม่ จำนวน DAG ต้องเท่าเดิมและไม่มี import error
 
 ---
 
@@ -503,7 +531,7 @@ helm upgrade airflow apache-airflow/airflow -n airflow --version <chart-version>
 
 **สิ่งที่ต้องยืนยันใน sandbox (ระดับ 3):**
 - `airflow dag-processor --bundle-name` ทำงาน และแต่ละ pod parse เฉพาะ bundle ของตัวเอง
-- `.airflowignore` ที่ root ไม่ส่งผลกับ bundle ที่เริ่มที่ folder ย่อย
+- `.airflowignore` ที่ root ไม่ส่งผลกับ bundle ที่เริ่มที่ folder ย่อย แต่ `.airflowignore` ใน folder ของ app มีผล (ลองใส่ `utils/` แล้วดูว่าไฟล์ใน `utils/` ไม่ถูก parse)
 - ตอนย้าย DAG ข้าม bundle ประวัติ run และ version ยังอยู่ (เพราะ `dag_id` เดิม) และไม่มี DAG ค้างเป็น stale
 - task ของ DAG ใน bundle ใหม่รันบน worker ได้
 
